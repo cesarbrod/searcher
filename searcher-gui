@@ -1,0 +1,1267 @@
+#!/usr/bin/env python3
+"""
+searcher-gui — graphical wizard wrapper for the `searcher` program.
+
+Walks the user through 4 steps: where to search, which files, what to find,
+and options — then shows results with previews.
+
+  ./searcher-gui            # needs `searcher` in the same folder + PyQt6
+
+First run asks for the interface language (English, Português, Español,
+Français), saved to ~/.config/searcher-gui/settings.json.
+
+On Wayland it uses Qt's native wayland platform plugin automatically.
+Headless smoke test:  QT_QPA_PLATFORM=offscreen ./searcher-gui --self-test
+"""
+
+import csv
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+PROG = "searcher-gui"
+VERSION = "1.0.0"
+
+HERE = Path(__file__).resolve().parent
+CONFIG_DIR = Path.home() / ".config" / "searcher-gui"
+SETTINGS_FILE = CONFIG_DIR / "settings.json"
+
+# Native Wayland when available (must be set before QApplication is created).
+if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "wayland"
+
+try:
+    from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QUrl, pyqtSignal
+    from PyQt6.QtGui import QAction, QDesktopServices
+    from PyQt6.QtWidgets import (
+        QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+        QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+        QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton,
+        QSpinBox, QSplitter, QTextBrowser, QVBoxLayout, QWidget, QWizard,
+        QWizardPage, QDialog, QDialogButtonBox, QMenu, QStatusBar,
+    )
+except ImportError:
+    print("searcher-gui needs PyQt6:  pip install PyQt6", file=sys.stderr)
+    sys.exit(2)
+
+
+def load_core():
+    """Import the `searcher` script sitting next to this GUI as a module."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    core_path = HERE / "searcher"
+    if not core_path.is_file():
+        QMessageBox.critical(
+            None, PROG,
+            f"Could not find the 'searcher' program next to this GUI.\n"
+            f"Expected at:\n{core_path}")
+        sys.exit(2)
+    loader = SourceFileLoader("searcher_core", str(core_path))
+    spec = importlib.util.spec_from_loader("searcher_core", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------------------
+# Interface strings (English, Português, Español, Français)
+# ---------------------------------------------------------------------------
+
+LANGS = ("en", "pt_BR", "es", "fr")
+LANG_NAMES = {
+    "en": "English",
+    "pt_BR": "Português (Brasil)",
+    "es": "Español",
+    "fr": "Français",
+}
+
+S = {
+    # ------------------------------------------------------------------ en
+    "en": {
+        "app_title": "searcher — find documents",
+        "lang_title": "Choose your language",
+        "lang_prompt": "Select the interface language (you can change it later in Settings):",
+        "ok": "OK", "cancel": "Cancel", "browse": "Browse…", "search": "Search",
+        "next": "Next >", "back": "< Back", "finish": "Finish",
+        "p1_title": "1. Where to search",
+        "p1_sub": "Pick the folder to look in.",
+        "p1_folder": "Folder:",
+        "p1_recent": "Recent folders:",
+        "p1_recursive": "Search subfolders too (recursive)",
+        "p1_hidden": "Include hidden files and folders",
+        "p1_err": "Please pick a folder that exists.",
+        "p2_title": "2. Which files to search",
+        "p2_sub": "Choose what kind of files to look inside.",
+        "preset_docs": "Documents (PDF, Word, text, spreadsheets…)",
+        "preset_pdf": "PDF files only",
+        "preset_word": "Word documents (docx, odt, rtf)",
+        "preset_text": "Plain text & Markdown",
+        "preset_sheet": "Spreadsheets & presentations",
+        "preset_code": "Documents + source code",
+        "preset_custom": "Custom extensions:",
+        "p2_custom_ph": "e.g. pdf,docx,txt",
+        "p3_title": "3. What to find",
+        "p3_sub": "Describe what you are looking for.",
+        "mode_content": "Inside file contents",
+        "mode_name": "In file names",
+        "mode_both": "Both (name AND content must match)",
+        "f_all": "All of these words:",
+        "f_all_ph": "e.g. annual report",
+        "f_any": "Any of these words:",
+        "f_any_ph": "e.g. budget forecast",
+        "f_phrase": "Exact phrase:",
+        "f_phrase_ph": "e.g. quarterly results",
+        "f_advanced": "Edit the search text directly (advanced)",
+        "f_query": "Search text sent to searcher:",
+        "tip_or": "Tip: use the Any field on its own for OR logic.",
+        "p3_err": "Please type at least one word or phrase.",
+        "p4_title": "4. Options",
+        "p4_sub": "Fine-tune the search. Defaults are fine for most cases.",
+        "o_case": "Match upper/lower case exactly",
+        "o_maxsize": "Skip files bigger than (MB):",
+        "o_limit": "Stop after N results (0 = no limit):",
+        "o_lines": "Preview lines per result:",
+        "r_title": "searcher — results",
+        "r_hits": "{n} match(es)",
+        "r_none": "No matches. Try fewer words, an OR search, or more file types.",
+        "r_open": "Open", "r_folder": "Show in folder", "r_copy": "Copy path",
+        "r_save": "Save list…", "r_new": "New search",
+        "r_cancel_search": "Cancel",
+        "r_searching": "Searching… {done}/{total}",
+        "r_scanning": "Scanning files… {n} found",
+        "r_summary": "{n} match(es) in {m} file(s) ({t:.1f}s)",
+        "r_save_title": "Save results",
+        "r_save_filter": "CSV files (*.csv);;Text files (*.txt)",
+        "r_saved": "Saved {n} result(s) to:\n{path}",
+        "r_copied": "Path copied to clipboard.",
+        "menu_settings": "Settings", "menu_language": "Language",
+        "menu_help": "Help", "menu_about": "About",
+        "about_title": "About searcher-gui",
+        "about_text": ("<b>searcher-gui {v}</b><br><br>"
+                       "Graphical wizard for the <b>searcher</b> document finder.<br>"
+                       "Searches PDF, Word, text and more by name or content.<br><br>"
+                       "Full manual: <b>docs/tutorial.md</b> (also in Portuguese, "
+                       "Spanish and French).<br>"
+                       "Project: https://github.com/cesarbrod/searcher"),
+        "warn_title": "searcher",
+        "lang_restart_note": "Language changed. The wizard restarts from step 1.",
+    },
+    # --------------------------------------------------------------- pt_BR
+    "pt_BR": {
+        "app_title": "searcher — encontrar documentos",
+        "lang_title": "Escolha seu idioma",
+        "lang_prompt": "Selecione o idioma da interface (dá para trocar depois em Configurações):",
+        "ok": "OK", "cancel": "Cancelar", "browse": "Procurar…", "search": "Pesquisar",
+        "next": "Avançar >", "back": "< Voltar", "finish": "Concluir",
+        "p1_title": "1. Onde pesquisar",
+        "p1_sub": "Escolha a pasta onde procurar.",
+        "p1_folder": "Pasta:",
+        "p1_recent": "Pastas recentes:",
+        "p1_recursive": "Pesquisar também nas subpastas (recursivo)",
+        "p1_hidden": "Incluir arquivos e pastas ocultos",
+        "p1_err": "Escolha uma pasta que exista.",
+        "p2_title": "2. Quais arquivos pesquisar",
+        "p2_sub": "Escolha que tipo de arquivo olhar por dentro.",
+        "preset_docs": "Documentos (PDF, Word, texto, planilhas…)",
+        "preset_pdf": "Só arquivos PDF",
+        "preset_word": "Documentos do Word (docx, odt, rtf)",
+        "preset_text": "Texto simples e Markdown",
+        "preset_sheet": "Planilhas e apresentações",
+        "preset_code": "Documentos + código-fonte",
+        "preset_custom": "Extensões personalizadas:",
+        "p2_custom_ph": "ex.: pdf,docx,txt",
+        "p3_title": "3. O que encontrar",
+        "p3_sub": "Descreva o que você procura.",
+        "mode_content": "Dentro do conteúdo dos arquivos",
+        "mode_name": "Nos nomes dos arquivos",
+        "mode_both": "Ambos (nome E conteúdo precisam combinar)",
+        "f_all": "Todas estas palavras:",
+        "f_all_ph": "ex.: annual report",
+        "f_any": "Qualquer uma destas palavras:",
+        "f_any_ph": "ex.: budget forecast",
+        "f_phrase": "Frase exata:",
+        "f_phrase_ph": "ex.: quarterly results",
+        "f_advanced": "Editar o texto de busca diretamente (avançado)",
+        "f_query": "Texto de busca enviado ao searcher:",
+        "tip_or": "Dica: use o campo Qualquer uma sozinho para lógica OU.",
+        "p3_err": "Digite pelo menos uma palavra ou frase.",
+        "p4_title": "4. Opções",
+        "p4_sub": "Ajuste fino da pesquisa. O padrão serve na maioria dos casos.",
+        "o_case": "Diferenciar maiúsculas de minúsculas",
+        "o_maxsize": "Pular arquivos maiores que (MB):",
+        "o_limit": "Parar após N resultados (0 = sem limite):",
+        "o_lines": "Linhas de prévia por resultado:",
+        "r_title": "searcher — resultados",
+        "r_hits": "{n} resultado(s)",
+        "r_none": "Nada encontrado. Tente menos palavras, uma busca OU ou mais tipos de arquivo.",
+        "r_open": "Abrir", "r_folder": "Mostrar na pasta", "r_copy": "Copiar caminho",
+        "r_save": "Salvar lista…", "r_new": "Nova pesquisa",
+        "r_cancel_search": "Cancelar",
+        "r_searching": "Pesquisando… {done}/{total}",
+        "r_scanning": "Varrendo arquivos… {n} encontrados",
+        "r_summary": "{n} resultado(s) em {m} arquivo(s) ({t:.1f}s)",
+        "r_save_title": "Salvar resultados",
+        "r_save_filter": "Arquivos CSV (*.csv);;Arquivos de texto (*.txt)",
+        "r_saved": "{n} resultado(s) salvos em:\n{path}",
+        "r_copied": "Caminho copiado.",
+        "menu_settings": "Configurações", "menu_language": "Idioma",
+        "menu_help": "Ajuda", "menu_about": "Sobre",
+        "about_title": "Sobre o searcher-gui",
+        "about_text": ("<b>searcher-gui {v}</b><br><br>"
+                       "Assistente gráfico para o buscador de documentos "
+                       "<b>searcher</b>.<br>"
+                       "Pesquisa PDF, Word, texto e mais, por nome ou conteúdo.<br><br>"
+                       "Manual completo: <b>docs/tutorial-ptbr.md</b> (também em "
+                       "inglês, espanhol e francês).<br>"
+                       "Projeto: https://github.com/cesarbrod/searcher"),
+        "warn_title": "searcher",
+        "lang_restart_note": "Idioma trocado. O assistente recomeça do passo 1.",
+    },
+    # ------------------------------------------------------------------ es
+    "es": {
+        "app_title": "searcher — encontrar documentos",
+        "lang_title": "Elige tu idioma",
+        "lang_prompt": "Selecciona el idioma de la interfaz (podrás cambiarlo en Ajustes):",
+        "ok": "Aceptar", "cancel": "Cancelar", "browse": "Examinar…", "search": "Buscar",
+        "next": "Siguiente >", "back": "< Atrás", "finish": "Terminar",
+        "p1_title": "1. Dónde buscar",
+        "p1_sub": "Elige la carpeta donde buscar.",
+        "p1_folder": "Carpeta:",
+        "p1_recent": "Carpetas recientes:",
+        "p1_recursive": "Buscar también en subcarpetas (recursivo)",
+        "p1_hidden": "Incluir archivos y carpetas ocultos",
+        "p1_err": "Elige una carpeta que exista.",
+        "p2_title": "2. Qué archivos buscar",
+        "p2_sub": "Elige qué tipo de archivos mirar por dentro.",
+        "preset_docs": "Documentos (PDF, Word, texto, hojas de cálculo…)",
+        "preset_pdf": "Solo archivos PDF",
+        "preset_word": "Documentos de Word (docx, odt, rtf)",
+        "preset_text": "Texto simple y Markdown",
+        "preset_sheet": "Hojas de cálculo y presentaciones",
+        "preset_code": "Documentos + código fuente",
+        "preset_custom": "Extensiones personalizadas:",
+        "p2_custom_ph": "ej.: pdf,docx,txt",
+        "p3_title": "3. Qué encontrar",
+        "p3_sub": "Describe lo que buscas.",
+        "mode_content": "Dentro del contenido de los archivos",
+        "mode_name": "En los nombres de los archivos",
+        "mode_both": "Ambos (nombre Y contenido deben coincidir)",
+        "f_all": "Todas estas palabras:",
+        "f_all_ph": "ej.: annual report",
+        "f_any": "Cualquiera de estas palabras:",
+        "f_any_ph": "ej.: budget forecast",
+        "f_phrase": "Frase exacta:",
+        "f_phrase_ph": "ej.: quarterly results",
+        "f_advanced": "Editar el texto de búsqueda directamente (avanzado)",
+        "f_query": "Texto de búsqueda enviado a searcher:",
+        "tip_or": "Consejo: usa el campo Cualquiera solo para lógica O.",
+        "p3_err": "Escribe al menos una palabra o frase.",
+        "p4_title": "4. Opciones",
+        "p4_sub": "Ajusta la búsqueda. Los valores sirven en la mayoría de los casos.",
+        "o_case": "Distinguir mayúsculas y minúsculas",
+        "o_maxsize": "Omitir archivos de más de (MB):",
+        "o_limit": "Detener tras N resultados (0 = sin límite):",
+        "o_lines": "Líneas de vista previa por resultado:",
+        "r_title": "searcher — resultados",
+        "r_hits": "{n} resultado(s)",
+        "r_none": "Sin resultados. Prueba con menos palabras, una búsqueda O o más tipos de archivo.",
+        "r_open": "Abrir", "r_folder": "Mostrar en carpeta", "r_copy": "Copiar ruta",
+        "r_save": "Guardar lista…", "r_new": "Nueva búsqueda",
+        "r_cancel_search": "Cancelar",
+        "r_searching": "Buscando… {done}/{total}",
+        "r_scanning": "Explorando archivos… {n} encontrados",
+        "r_summary": "{n} resultado(s) en {m} archivo(s) ({t:.1f}s)",
+        "r_save_title": "Guardar resultados",
+        "r_save_filter": "Archivos CSV (*.csv);;Archivos de texto (*.txt)",
+        "r_saved": "{n} resultado(s) guardados en:\n{path}",
+        "r_copied": "Ruta copiada.",
+        "menu_settings": "Ajustes", "menu_language": "Idioma",
+        "menu_help": "Ayuda", "menu_about": "Acerca de",
+        "about_title": "Acerca de searcher-gui",
+        "about_text": ("<b>searcher-gui {v}</b><br><br>"
+                       "Asistente gráfico para el buscador de documentos "
+                       "<b>searcher</b>.<br>"
+                       "Busca en PDF, Word, texto y más, por nombre o contenido.<br><br>"
+                       "Manual completo: <b>docs/tutorial-es.md</b> (también en "
+                       "inglés, portugués y francés).<br>"
+                       "Proyecto: https://github.com/cesarbrod/searcher"),
+        "warn_title": "searcher",
+        "lang_restart_note": "Idioma cambiado. El asistente vuelve al paso 1.",
+    },
+    # ------------------------------------------------------------------ fr
+    "fr": {
+        "app_title": "searcher — retrouver des documents",
+        "lang_title": "Choisissez votre langue",
+        "lang_prompt": "Sélectionnez la langue de l'interface (modifiable dans Réglages) :",
+        "ok": "OK", "cancel": "Annuler", "browse": "Parcourir…", "search": "Chercher",
+        "next": "Suivant >", "back": "< Retour", "finish": "Terminer",
+        "p1_title": "1. Où chercher",
+        "p1_sub": "Choisissez le dossier à fouiller.",
+        "p1_folder": "Dossier :",
+        "p1_recent": "Dossiers récents :",
+        "p1_recursive": "Fouiller aussi les sous-dossiers (récursif)",
+        "p1_hidden": "Inclure fichiers et dossiers cachés",
+        "p1_err": "Veuillez choisir un dossier existant.",
+        "p2_title": "2. Quels fichiers fouiller",
+        "p2_sub": "Choisissez quels types de fichiers regarder.",
+        "preset_docs": "Documents (PDF, Word, texte, tableurs…)",
+        "preset_pdf": "Fichiers PDF uniquement",
+        "preset_word": "Documents Word (docx, odt, rtf)",
+        "preset_text": "Texte brut et Markdown",
+        "preset_sheet": "Tableurs et présentations",
+        "preset_code": "Documents + code source",
+        "preset_custom": "Extensions personnalisées :",
+        "p2_custom_ph": "ex. : pdf,docx,txt",
+        "p3_title": "3. Quoi trouver",
+        "p3_sub": "Décrivez ce que vous cherchez.",
+        "mode_content": "Dans le contenu des fichiers",
+        "mode_name": "Dans les noms des fichiers",
+        "mode_both": "Les deux (nom ET contenu doivent correspondre)",
+        "f_all": "Tous ces mots :",
+        "f_all_ph": "ex. : annual report",
+        "f_any": "L'un de ces mots :",
+        "f_any_ph": "ex. : budget forecast",
+        "f_phrase": "Phrase exacte :",
+        "f_phrase_ph": "ex. : quarterly results",
+        "f_advanced": "Modifier le texte de recherche directement (avancé)",
+        "f_query": "Texte de recherche envoyé à searcher :",
+        "tip_or": "Astuce : utilisez le champ « L'un » seul pour la logique OU.",
+        "p3_err": "Veuillez saisir au moins un mot ou une phrase.",
+        "p4_title": "4. Options",
+        "p4_sub": "Affinez la recherche. Les défauts conviennent le plus souvent.",
+        "o_case": "Respecter majuscules/minuscules",
+        "o_maxsize": "Ignorer les fichiers de plus de (Mo) :",
+        "o_limit": "S'arrêter après N résultats (0 = sans limite) :",
+        "o_lines": "Lignes d'aperçu par résultat :",
+        "r_title": "searcher — résultats",
+        "r_hits": "{n} résultat(s)",
+        "r_none": "Aucun résultat. Essayez moins de mots, une recherche OU ou plus de types de fichiers.",
+        "r_open": "Ouvrir", "r_folder": "Voir dans le dossier", "r_copy": "Copier le chemin",
+        "r_save": "Enregistrer la liste…", "r_new": "Nouvelle recherche",
+        "r_cancel_search": "Annuler",
+        "r_searching": "Recherche… {done}/{total}",
+        "r_scanning": "Exploration des fichiers… {n} trouvés",
+        "r_summary": "{n} résultat(s) dans {m} fichier(s) ({t:.1f}s)",
+        "r_save_title": "Enregistrer les résultats",
+        "r_save_filter": "Fichiers CSV (*.csv);;Fichiers texte (*.txt)",
+        "r_saved": "{n} résultat(s) enregistrés dans :\n{path}",
+        "r_copied": "Chemin copié.",
+        "menu_settings": "Réglages", "menu_language": "Langue",
+        "menu_help": "Aide", "menu_about": "À propos",
+        "about_title": "À propos de searcher-gui",
+        "about_text": ("<b>searcher-gui {v}</b><br><br>"
+                       "Assistant graphique pour le chercheur de documents "
+                       "<b>searcher</b>.<br>"
+                       "Cherche dans PDF, Word, texte et plus, par nom ou contenu.<br><br>"
+                       "Manuel complet : <b>docs/tutorial-fr.md</b> (aussi en "
+                       "anglais, portugais et espagnol).<br>"
+                       "Projet : https://github.com/cesarbrod/searcher"),
+        "warn_title": "searcher",
+        "lang_restart_note": "Langue changée. L'assistant repart de l'étape 1.",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+DEFAULTS = {
+    "lang": None,
+    "recent_folders": [],
+    "last": {
+        "folder": str(Path.home() / "Documents"),
+        "preset": "docs",
+        "custom_ext": "pdf,docx,txt,md",
+        "mode": "content",
+        "all_words": "",
+        "any_words": "",
+        "phrase": "",
+        "advanced": False,
+        "raw_query": "",
+        "case": False,
+        "max_size": 50,
+        "limit": 500,
+        "lines": 3,
+        "recursive": True,
+        "hidden": False,
+    },
+}
+
+
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        merged = dict(DEFAULTS)
+        merged.update(data)
+        last = dict(DEFAULTS["last"])
+        last.update(data.get("last", {}))
+        merged["last"] = last
+        return merged
+    except Exception:
+        return {"lang": None,
+                "recent_folders": [],
+                "last": dict(DEFAULTS["last"])}
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Query composer (mirrors the core query syntax)
+# ---------------------------------------------------------------------------
+
+def compose_query(all_words: str, any_words: str, phrase: str) -> str:
+    """Build a core query string from the three beginner fields.
+
+    any-words use OR only when they stand alone; otherwise everything is
+    ANDed (predictable, documented in the tip label).
+    """
+    parts: list[str] = []
+    aw = all_words.split()
+    if aw:
+        parts.append(" ".join(aw))
+    ph = phrase.strip()
+    if ph:
+        parts.append(f'"{ph}"')
+    yw = any_words.split()
+    if yw:
+        if not parts:
+            parts.append(" OR ".join(yw))
+        else:
+            parts.append(" ".join(yw))
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Background search worker (keeps the UI responsive + cancellable)
+# ---------------------------------------------------------------------------
+
+class QtProgress:
+    """Adapter: core calls .scanning(n) / .searching(d,t,name)."""
+
+    def __init__(self, worker: "SearchWorker"):
+        self._w = worker
+
+    def scanning(self, n: int) -> None:
+        self._w.scan_count.emit(n)
+
+    def searching(self, done: int, total: int, name: str) -> None:
+        if self._w.cancelled:
+            raise Cancelled()
+        self._w.progress.emit(done, total, name)
+
+
+class Cancelled(Exception):
+    pass
+
+
+class SearchWorker(QObject):
+    scan_count = pyqtSignal(int)
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(list, list, float)  # results, warnings, elapsed
+    failed = pyqtSignal(str)
+
+    def __init__(self, core, params: dict):
+        super().__init__()
+        self.core = core
+        self.params = params
+        self.cancelled = False
+
+    def run(self) -> None:
+        t0 = time.perf_counter()
+        try:
+            p = self.params
+            prog = QtProgress(self)
+            files, _ = self.core.iter_candidate_files(
+                p["root"], p["recursive"], p["hidden"],
+                p["allowed"], p["max_bytes"], progress=prog)
+            if self.cancelled:
+                return
+            name_groups = self.core.parse_query(p["name_q"]) if p["name_q"] else []
+            content_groups = (self.core.parse_query(p["content_q"])
+                              if p["content_q"] else [])
+            out: list[tuple[str, str | None]] = []
+            warnings: list[str] = []
+            if p["content_q"] and p["name_q"]:
+                name_hits = {f for f in files
+                             if self.core.match_text(f.name, name_groups, p["cs"])}
+                subset = [f for f in files if f in name_hits]
+                hits, w, _ = self.core.search_by_content(
+                    subset, content_groups, p["cs"], p["max_bytes"],
+                    p["verbose_errors"], progress=prog)
+                warnings.extend(w)
+                out = [(str(fp), text) for fp, text in hits]
+            elif p["content_q"]:
+                hits, w, _ = self.core.search_by_content(
+                    files, content_groups, p["cs"], p["max_bytes"],
+                    p["verbose_errors"], progress=prog)
+                warnings.extend(w)
+                out = [(str(fp), text) for fp, text in hits]
+            else:
+                hits = self.core.search_by_name(files, name_groups, p["cs"])
+                out = [(str(fp), None) for fp in hits]
+            out.sort(key=lambda r: r[0].lower())
+            if p["limit"] and p["limit"] > 0:
+                out = out[: p["limit"]]
+            self.finished.emit(out, warnings,
+                               time.perf_counter() - t0)
+        except Cancelled:
+            return
+        except Exception as e:  # noqa: BLE001 — show it in the UI
+            self.failed.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# First-run language dialog
+# ---------------------------------------------------------------------------
+
+class LanguageDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Neutral wording here: user hasn't picked a language yet.
+        self.setWindowTitle("searcher-gui — Language / Idioma / Idioma / Langue")
+        self.selected = "en"
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Choose your language / Escolha seu idioma /\n"
+            "Elige tu idioma / Choisissez votre langue :"))
+        self.list = QListWidget()
+        for code in LANGS:
+            self.list.addItem(f"{LANG_NAMES[code]}  ({code})")
+        self.list.setCurrentRow(0)
+        self.list.itemDoubleClicked.connect(lambda _i: self.accept())
+        layout.addWidget(self.list)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        row = self.list.currentRow()
+        self.selected = LANGS[row] if 0 <= row < len(LANGS) else "en"
+        super().accept()
+
+
+# ---------------------------------------------------------------------------
+# Main wizard
+# ---------------------------------------------------------------------------
+
+PRESETS = ("docs", "pdf", "word", "text", "sheet", "code", "custom")
+
+
+class SearchWizard(QWizard):
+    def __init__(self, core, settings: dict, on_search, parent=None):
+        super().__init__(parent)
+        self.core = core
+        self.settings = settings
+        self.on_search = on_search
+        self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+        self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
+        self.setMinimumSize(560, 420)
+
+        self.page1 = self._build_page1()
+        self.page2 = self._build_page2()
+        self.page3 = self._build_page3()
+        self.page4 = self._build_page4()
+        for pg in (self.page1, self.page2, self.page3, self.page4):
+            self.addPage(pg)
+
+        self.button(QWizard.WizardButton.FinishButton).clicked.connect(
+            self._finish_search)
+        self._retranslate()
+        self._restore_last()
+
+    # -- i18n helper -----------------------------------------------------
+    def tr(self, key: str) -> str:
+        lang = self.settings.get("lang") or "en"
+        return S.get(lang, S["en"]).get(key, S["en"].get(key, key))
+
+    def _retranslate(self) -> None:
+        t = self.tr
+        self.setWindowTitle(t("app_title"))
+        self.setButtonText(QWizard.WizardButton.NextButton, t("next"))
+        self.setButtonText(QWizard.WizardButton.BackButton, t("back"))
+        self.setButtonText(QWizard.WizardButton.FinishButton, t("search"))
+        self.setButtonText(QWizard.WizardButton.CancelButton, t("cancel"))
+        self.page1.setTitle(t("p1_title")); self.page1.setSubTitle(t("p1_sub"))
+        self.lbl_folder.setText(t("p1_folder"))
+        self.lbl_recent.setText(t("p1_recent"))
+        self.btn_browse.setText(t("browse"))
+        self.chk_recursive.setText(t("p1_recursive"))
+        self.chk_hidden.setText(t("p1_hidden"))
+        self.page2.setTitle(t("p2_title")); self.page2.setSubTitle(t("p2_sub"))
+        for key, radio in self.preset_radios.items():
+            radio.setText(t(f"preset_{key}"))
+        self.custom_ext.setPlaceholderText(t("p2_custom_ph"))
+        self.page3.setTitle(t("p3_title")); self.page3.setSubTitle(t("p3_sub"))
+        self.mode_content.setText(t("mode_content"))
+        self.mode_name.setText(t("mode_name"))
+        self.mode_both.setText(t("mode_both"))
+        self.lbl_all.setText(t("f_all")); self.ed_all.setPlaceholderText(t("f_all_ph"))
+        self.lbl_any.setText(t("f_any")); self.ed_any.setPlaceholderText(t("f_any_ph"))
+        self.lbl_phrase.setText(t("f_phrase"))
+        self.ed_phrase.setPlaceholderText(t("f_phrase_ph"))
+        self.chk_advanced.setText(t("f_advanced"))
+        self.lbl_query.setText(t("f_query"))
+        self.lbl_tip.setText(t("tip_or"))
+        self.page4.setTitle(t("p4_title")); self.page4.setSubTitle(t("p4_sub"))
+        self.chk_case.setText(t("o_case"))
+        self.lbl_max.setText(t("o_maxsize"))
+        self.lbl_limit.setText(t("o_limit"))
+        self.lbl_lines.setText(t("o_lines"))
+
+    # -- page 1: where ----------------------------------------------------
+    def _build_page1(self) -> QWizardPage:
+        pg = QWizardPage()
+        lay = QVBoxLayout(pg)
+        row = QHBoxLayout()
+        self.lbl_folder = QLabel()
+        self.ed_folder = QLineEdit()
+        self.ed_folder.textChanged.connect(lambda _s: pg.completeChanged.emit())
+        self.btn_browse = QPushButton()
+        self.btn_browse.clicked.connect(self._pick_folder)
+        row.addWidget(self.lbl_folder)
+        row.addWidget(self.ed_folder, 1)
+        row.addWidget(self.btn_browse)
+        lay.addLayout(row)
+        self.lbl_recent = QLabel()
+        self.cb_recent = QComboBox()
+        self.cb_recent.setEditable(False)
+        self.cb_recent.activated.connect(
+            lambda i: self.ed_folder.setText(self.cb_recent.itemText(i)))
+        lay.addWidget(self.lbl_recent)
+        lay.addWidget(self.cb_recent)
+        lay.addStretch(1)
+        self.chk_recursive = QCheckBox()
+        self.chk_recursive.setChecked(True)
+        self.chk_hidden = QCheckBox()
+        lay.addWidget(self.chk_recursive)
+        lay.addWidget(self.chk_hidden)
+
+        orig_is_complete = pg.isComplete
+
+        def is_complete() -> bool:
+            ok = Path(self.ed_folder.text()).expanduser().exists()
+            return bool(ok) and orig_is_complete()
+
+        pg.isComplete = is_complete  # type: ignore[method-assign]
+        pg.validatePage = lambda: (  # type: ignore[method-assign]
+            self._ok_or_warn(Path(self.ed_folder.text()).expanduser().exists(),
+                             self.tr("p1_err")))
+        return pg
+
+    def _ok_or_warn(self, ok: bool, msg: str) -> bool:
+        if not ok:
+            QMessageBox.warning(self, self.tr("warn_title"), msg)
+        return ok
+
+    def _pick_folder(self) -> None:
+        start = self.ed_folder.text() or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, self.tr("p1_folder"), start)
+        if d:
+            self.ed_folder.setText(d)
+
+    # -- page 2: which files ------------------------------------------------
+    def _build_page2(self) -> QWizardPage:
+        pg = QWizardPage()
+        lay = QVBoxLayout(pg)
+        self.preset_radios: dict[str, QRadioButton] = {}
+        for key in PRESETS:
+            rb = QRadioButton()
+            if key == "docs":
+                rb.setChecked(True)
+            if key == "custom":
+                row = QHBoxLayout()
+                row.addWidget(rb)
+                self.custom_ext = QLineEdit()
+                row.addWidget(self.custom_ext, 1)
+                lay.addLayout(row)
+                rb.toggled.connect(
+                    lambda on: self.custom_ext.setEnabled(on))
+                self.custom_ext.setEnabled(False)
+            else:
+                lay.addWidget(rb)
+            self.preset_radios[key] = rb
+        lay.addStretch(1)
+        return pg
+
+    # -- page 3: what to find ----------------------------------------------
+    def _build_page3(self) -> QWizardPage:
+        pg = QWizardPage()
+        lay = QVBoxLayout(pg)
+        self.mode_content = QRadioButton(); self.mode_content.setChecked(True)
+        self.mode_name = QRadioButton()
+        self.mode_both = QRadioButton()
+        lay.addWidget(self.mode_content)
+        lay.addWidget(self.mode_name)
+        lay.addWidget(self.mode_both)
+        form = QFormLayout()
+        self.lbl_all = QLabel(); self.ed_all = QLineEdit()
+        self.lbl_any = QLabel(); self.ed_any = QLineEdit()
+        self.lbl_phrase = QLabel(); self.ed_phrase = QLineEdit()
+        form.addRow(self.lbl_all, self.ed_all)
+        form.addRow(self.lbl_any, self.ed_any)
+        form.addRow(self.lbl_phrase, self.ed_phrase)
+        lay.addLayout(form)
+        self.chk_advanced = QCheckBox()
+        self.chk_advanced.toggled.connect(self._toggle_advanced)
+        lay.addWidget(self.chk_advanced)
+        self.lbl_query = QLabel()
+        self.ed_query = QLineEdit()
+        self.ed_query.setReadOnly(True)
+        lay.addWidget(self.lbl_query)
+        lay.addWidget(self.ed_query)
+        self.lbl_tip = QLabel()
+        self.lbl_tip.setWordWrap(True)
+        self.lbl_tip.setStyleSheet("color: gray; font-style: italic;")
+        lay.addWidget(self.lbl_tip)
+        for ed in (self.ed_all, self.ed_any, self.ed_phrase):
+            ed.textChanged.connect(self._refresh_query)
+        self._refresh_query()
+
+        orig_is_complete = pg.isComplete
+
+        def is_complete() -> bool:
+            return bool(self._effective_query().strip()) and orig_is_complete()
+
+        pg.isComplete = is_complete  # type: ignore[method-assign]
+        for ed in (self.ed_all, self.ed_any, self.ed_phrase, self.ed_query):
+            ed.textChanged.connect(lambda _s: pg.completeChanged.emit())
+        pg.validatePage = lambda: self._ok_or_warn(  # type: ignore[method-assign]
+            bool(self._effective_query().strip()), self.tr("p3_err"))
+        return pg
+
+    def _toggle_advanced(self, on: bool) -> None:
+        self.ed_query.setReadOnly(not on)
+        for ed in (self.ed_all, self.ed_any, self.ed_phrase):
+            ed.setEnabled(not on)
+        if not on:
+            self._refresh_query()
+
+    def _refresh_query(self) -> None:
+        if not self.chk_advanced.isChecked():
+            self.ed_query.setText(compose_query(
+                self.ed_all.text(), self.ed_any.text(),
+                self.ed_phrase.text()))
+
+    def _effective_query(self) -> str:
+        if self.chk_advanced.isChecked():
+            return self.ed_query.text()
+        return compose_query(self.ed_all.text(), self.ed_any.text(),
+                             self.ed_phrase.text())
+
+    # -- page 4: options ----------------------------------------------------
+    def _build_page4(self) -> QWizardPage:
+        pg = QWizardPage()
+        form = QFormLayout(pg)
+        self.chk_case = QCheckBox()
+        self.spin_max = QSpinBox()
+        self.spin_max.setRange(1, 10000)
+        self.spin_max.setValue(50)
+        self.spin_limit = QSpinBox()
+        self.spin_limit.setRange(0, 100000)
+        self.spin_limit.setValue(500)
+        self.spin_lines = QSpinBox()
+        self.spin_lines.setRange(0, 20)
+        self.spin_lines.setValue(3)
+        self.lbl_max = QLabel(); self.lbl_limit = QLabel(); self.lbl_lines = QLabel()
+        form.addRow(self.chk_case)
+        form.addRow(self.lbl_max, self.spin_max)
+        form.addRow(self.lbl_limit, self.spin_limit)
+        form.addRow(self.lbl_lines, self.spin_lines)
+        return pg
+
+    # -- restore last session ----------------------------------------------
+    def _restore_last(self) -> None:
+        last = self.settings.get("last", {})
+        folder = last.get("folder") or str(Path.home() / "Documents")
+        self.ed_folder.setText(folder)
+        recents = [f for f in self.settings.get("recent_folders", []) if f != folder]
+        self.cb_recent.clear()
+        self.cb_recent.addItems([folder, *recents][:9])
+        preset = last.get("preset", "docs")
+        if preset in self.preset_radios:
+            self.preset_radios[preset].setChecked(True)
+        self.custom_ext.setText(last.get("custom_ext", "pdf,docx,txt,md"))
+        mode = last.get("mode", "content")
+        {"content": self.mode_content, "name": self.mode_name,
+         "both": self.mode_both}.get(mode, self.mode_content).setChecked(True)
+        self.ed_all.setText(last.get("all_words", ""))
+        self.ed_any.setText(last.get("any_words", ""))
+        self.ed_phrase.setText(last.get("phrase", ""))
+        adv = bool(last.get("advanced", False))
+        self.chk_advanced.setChecked(adv)
+        if adv:
+            self.ed_query.setText(last.get("raw_query", ""))
+        self.chk_case.setChecked(bool(last.get("case", False)))
+        self.spin_max.setValue(int(last.get("max_size", 50)))
+        self.spin_limit.setValue(int(last.get("limit", 500)))
+        self.spin_lines.setValue(int(last.get("lines", 3)))
+        self.chk_recursive.setChecked(bool(last.get("recursive", True)))
+        self.chk_hidden.setChecked(bool(last.get("hidden", False)))
+        self._refresh_query()
+
+    def collect(self) -> dict:
+        """Gather wizard state + resolve file-type preset to an ext set."""
+        core = self.core
+        preset = next((k for k, rb in self.preset_radios.items()
+                       if rb.isChecked()), "docs")
+        custom_raw = self.custom_ext.text()
+        if preset == "docs":
+            allowed: set[str] | None = set(core.DEFAULT_EXTS)
+        elif preset == "pdf":
+            allowed = {"pdf"}
+        elif preset == "word":
+            allowed = {"docx", "odt", "rtf"}
+        elif preset == "text":
+            allowed = {"txt", "md", "markdown", "rst", "log"}
+        elif preset == "sheet":
+            allowed = {"xlsx", "pptx", "csv", "tsv", "ods", "odp"}
+        elif preset == "code":
+            allowed = set(core.DEFAULT_EXTS) | set(core.ALL_TEXT_EXTRA)
+        else:
+            allowed = core.parse_ext_list(custom_raw) or set(core.DEFAULT_EXTS)
+        mode = ("content" if self.mode_content.isChecked()
+                else "name" if self.mode_name.isChecked() else "both")
+        query = self._effective_query().strip()
+        name_q = query if mode in ("name", "both") else None
+        content_q = query if mode in ("content", "both") else None
+        folder = str(Path(self.ed_folder.text()).expanduser())
+        params = {
+            "root": Path(folder),
+            "recursive": self.chk_recursive.isChecked(),
+            "hidden": self.chk_hidden.isChecked(),
+            "allowed": allowed,
+            "max_bytes": int(self.spin_max.value() * 1024 * 1024),
+            "name_q": name_q,
+            "content_q": content_q,
+            "cs": self.chk_case.isChecked(),
+            "limit": self.spin_limit.value(),
+            "lines": self.spin_lines.value(),
+            "verbose_errors": False,
+        }
+        # persist for next run
+        last = {
+            "folder": folder, "preset": preset, "custom_ext": custom_raw,
+            "mode": mode, "all_words": self.ed_all.text(),
+            "any_words": self.ed_any.text(), "phrase": self.ed_phrase.text(),
+            "advanced": self.chk_advanced.isChecked(),
+            "raw_query": self.ed_query.text(),
+            "case": params["cs"], "max_size": self.spin_max.value(),
+            "limit": params["limit"], "lines": params["lines"],
+            "recursive": params["recursive"], "hidden": params["hidden"],
+        }
+        self.settings["last"] = last
+        recents = [folder] + [f for f in self.settings.get("recent_folders", [])
+                              if f != folder]
+        self.settings["recent_folders"] = recents[:8]
+        save_settings(self.settings)
+        return params
+
+    def _finish_search(self) -> None:
+        self.on_search(self.collect())
+
+
+# ---------------------------------------------------------------------------
+# Results window
+# ---------------------------------------------------------------------------
+
+class ResultsWindow(QMainWindow):
+    def __init__(self, core, settings: dict, params: dict, query_text: str,
+                 on_new_search, on_lang_changed, parent=None):
+        super().__init__(parent)
+        self.core = core
+        self.settings = settings
+        self.params = params
+        self.query_text = query_text
+        self.on_new_search = on_new_search
+        self.on_lang_changed = on_lang_changed
+        self.results: list[tuple[str, str | None]] = []
+        self.warnings: list[str] = []
+        self.thread: QThread | None = None
+        self.worker: SearchWorker | None = None
+
+        t = self.tr
+        self.setWindowTitle(t("r_title"))
+        self.resize(860, 560)
+
+        # toolbar
+        bar = self.addToolBar("main")
+        self.act_open = bar.addAction(t("r_open"), self.open_selected)
+        self.act_folder = bar.addAction(t("r_folder"), self.reveal_selected)
+        self.act_copy = bar.addAction(t("r_copy"), self.copy_selected)
+        self.act_save = bar.addAction(t("r_save"), self.save_list)
+        self.act_new = bar.addAction(t("r_new"), self._new_search)
+        self.act_cancel = bar.addAction(t("r_cancel_search"), self.cancel_search)
+        self.act_cancel.setEnabled(False)
+
+        # menus
+        menubar = self.menuBar()
+        m_settings = menubar.addMenu(t("menu_settings"))
+        m_lang = m_settings.addMenu(t("menu_language"))  # type: ignore[arg-type]
+        for code in LANGS:
+            act = QAction(LANG_NAMES[code], self, checkable=True,
+                          checked=(settings.get("lang") == code))
+            act.triggered.connect(
+                lambda _c, c=code: self._change_language(c))
+            m_lang.addAction(act)
+        m_help = menubar.addMenu(t("menu_help"))
+        m_help.addAction(t("menu_about"), self._about)
+
+        # body
+        central = QWidget()
+        self.setCentralWidget(central)
+        lay = QVBoxLayout(central)
+        self.info = QLabel(f"<b>{self._esc(query_text)}</b> — {params['root']}")
+        self.info.setWordWrap(True)
+        lay.addWidget(self.info)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+        lay.addWidget(self.progress)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self.list = QListWidget()
+        self.list.itemSelectionChanged.connect(self._show_selected)
+        self.list.itemDoubleClicked.connect(lambda _i: self.open_selected())
+        self.preview = QTextBrowser()
+        self.preview.setOpenExternalLinks(False)
+        split.addWidget(self.list)
+        split.addWidget(self.preview)
+        split.setSizes([300, 560])
+        lay.addWidget(split, 1)
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
+
+        self._retranslate_toolbar()
+
+    # -- i18n ------------------------------------------------------------
+    def tr(self, key: str) -> str:
+        lang = self.settings.get("lang") or "en"
+        return S.get(lang, S["en"]).get(key, S["en"].get(key, key))
+
+    def _retranslate_toolbar(self) -> None:
+        t = self.tr
+        self.setWindowTitle(t("r_title"))
+        self.act_open.setText(t("r_open"))
+        self.act_folder.setText(t("r_folder"))
+        self.act_copy.setText(t("r_copy"))
+        self.act_save.setText(t("r_save"))
+        self.act_new.setText(t("r_new"))
+        self.act_cancel.setText(t("r_cancel_search"))
+
+    # -- search lifecycle --------------------------------------------------
+    def start(self) -> None:
+        t = self.tr
+        self.thread = QThread(self)
+        self.worker = SearchWorker(self.core, self.params)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.scan_count.connect(
+            lambda n: self.status.showMessage(t("r_scanning").format(n=n)))
+        self.worker.progress.connect(self._on_progress)
+        self.worker.finished.connect(self._on_finished)
+        self.worker.failed.connect(self._on_failed)
+        for sig in (self.worker.finished, self.worker.failed):
+            sig.connect(self.thread.quit)
+        self.act_cancel.setEnabled(True)
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)  # busy until totals are known
+        self.thread.start()
+
+    def _on_progress(self, done: int, total: int, name: str) -> None:
+        t = self.tr
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(done)
+        short = name if len(name) <= 40 else "…" + name[-39:]
+        self.status.showMessage(t("r_searching").format(
+            done=done, total=total) + f" — {short}")
+
+    def _on_finished(self, results: list, warnings: list, elapsed: float) -> None:
+        t = self.tr
+        self.results, self.warnings = results, warnings
+        self.act_cancel.setEnabled(False)
+        self.progress.setVisible(False)
+        self.list.clear()
+        for path, _text in results:
+            QListWidgetItem(Path(path).name, self.list).setData(
+                Qt.ItemDataRole.UserRole, path)
+            self.list.item(self.list.count() - 1).setToolTip(path)
+        if results:
+            self.list.setCurrentRow(0)
+            self.status.showMessage(t("r_summary").format(
+                n=len(results), m=self._scanned_hint(), t=elapsed))
+        else:
+            self.preview.setHtml(f"<i>{self._esc(t('r_none'))}</i>")
+            msg = t("r_summary").format(n=0, m=self._scanned_hint(), t=elapsed)
+            if warnings:
+                msg += " — " + "; ".join(warnings[:2])
+            self.status.showMessage(msg)
+        self._retranslate_toolbar()
+
+    def _scanned_hint(self) -> int:
+        return len(self.results)  # results already limited; show matches basis
+
+    def _on_failed(self, msg: str) -> None:
+        self.act_cancel.setEnabled(False)
+        self.progress.setVisible(False)
+        QMessageBox.warning(self, self.tr("warn_title"), msg)
+
+    def cancel_search(self) -> None:
+        if self.worker is not None:
+            self.worker.cancelled = True
+        if self.thread is not None:
+            self.thread.quit()
+        self.act_cancel.setEnabled(False)
+        self.progress.setVisible(False)
+        self.status.showMessage(self.tr("r_cancel_search"))
+
+    # -- result actions ------------------------------------------------------
+    def _selected_path(self) -> str | None:
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _selected_text(self) -> str | None:
+        path = self._selected_path()
+        if path is None:
+            return None
+        for p, text in self.results:
+            if p == path:
+                return text
+        return None
+
+    @staticmethod
+    def _esc(s: str) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(
+            ">", "&gt;")
+
+    def _show_selected(self) -> None:
+        path = self._selected_path()
+        text = self._selected_text()
+        if path is None:
+            return
+        if not text:
+            self.preview.setHtml(
+                f"<b>{self._esc(Path(path).name)}</b><br>{self._esc(path)}")
+            return
+        groups = self._groups()
+        idx = self.core.find_matching_lines(
+            text, groups, self.params["cs"])[: max(1, self.params["lines"])]
+        lines = text.splitlines()
+        terms = sorted({tm for g in groups for tm in g}, key=len, reverse=True)
+        html = [f"<b>{self._esc(Path(path).name)}</b>",
+                f"<i>{self._esc(path)}</i>", "<br>"]
+        for i in idx:
+            line = self._esc(lines[i].strip()[:500]) if 0 <= i < len(lines) else ""
+            for tm in terms:
+                try:
+                    line = re.sub(f"({re.escape(self._esc(tm))})",
+                                  r"<b>\1</b>", line,
+                                  flags=0 if self.params["cs"] else re.IGNORECASE)
+                except re.error:
+                    pass
+            html.append(f"• {line}<br>")
+        self.preview.setHtml("\n".join(html))
+
+    def _groups(self) -> list:
+        core = self.core
+        if self.params["content_q"]:
+            return core.parse_query(self.params["content_q"])
+        return core.parse_query(self.params["name_q"] or "")
+
+    def open_selected(self) -> None:
+        path = self._selected_path()
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def reveal_selected(self) -> None:
+        path = self._selected_path()
+        if path:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def copy_selected(self) -> None:
+        path = self._selected_path()
+        if path:
+            QApplication.clipboard().setText(path)
+            self.status.showMessage(self.tr("r_copied"), 3000)
+
+    def save_list(self) -> None:
+        t = self.tr
+        if not self.results:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("r_save_title"), "searcher_results.csv",
+            t("r_save_filter"))
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                with open(path, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(["file", "preview"])
+                    for p, text in self.results:
+                        w.writerow([p, (text or "").splitlines()[0][:300]
+                                    if text else ""])
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(p for p, _ in self.results) + "\n")
+        except OSError as e:
+            QMessageBox.warning(self, t("warn_title"), str(e))
+            return
+        QMessageBox.information(
+            self, t("r_save_title"),
+            t("r_saved").format(n=len(self.results), path=path))
+
+    def _new_search(self) -> None:
+        self.cancel_search()
+        self.on_new_search()
+
+    def _change_language(self, code: str) -> None:
+        self.settings["lang"] = code
+        save_settings(self.settings)
+        QMessageBox.information(self, self.tr("warn_title"),
+                                self.tr("lang_restart_note"))
+        self.on_lang_changed()
+
+    def _about(self) -> None:
+        QMessageBox.about(self, self.tr("about_title"),
+                          self.tr("about_text").format(v=VERSION))
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.cancel_search()
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+class GuiApp:
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        self.core = load_core()
+        self.settings = load_settings()
+        if not self.settings.get("lang"):
+            dlg = LanguageDialog()
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                sys.exit(0)
+            self.settings["lang"] = dlg.selected
+            save_settings(self.settings)
+        self.wizard: SearchWizard | None = None
+        self.results_win: ResultsWindow | None = None
+
+    def _show_wizard(self) -> None:
+        if self.wizard is not None:
+            self.wizard.close()
+        self.wizard = SearchWizard(self.core, self.settings,
+                                   self._start_search)
+        self.wizard.show()
+
+    def _start_search(self, params: dict) -> None:
+        if self.wizard is not None:
+            self.wizard.hide()
+        query = params["content_q"] or params["name_q"] or ""
+        self.results_win = ResultsWindow(
+            self.core, self.settings, params, query,
+            on_new_search=self._show_wizard,
+            on_lang_changed=self._show_wizard)
+        self.results_win.show()
+        self.results_win.start()
+
+    def run(self) -> int:
+        self._show_wizard()
+        return self.app.exec()
+
+
+def self_test() -> int:
+    """Headless smoke test (run with QT_QPA_PLATFORM=offscreen)."""
+    app = QApplication([])
+    core = load_core()
+    # 1. translation tables complete?
+    keys = set(S["en"])
+    for lang in LANGS[1:]:
+        missing = keys - set(S[lang])
+        extra = set(S[lang]) - keys
+        assert not missing, f"{lang} missing keys: {missing}"
+        assert not extra, f"{lang} extra keys: {extra}"
+    print(f"i18n OK ({len(keys)} keys x {len(LANGS)} langs)")
+    # 2. query composer
+    assert compose_query("a b", "", "") == "a b"
+    assert compose_query("", "x y", "") == "x OR y"
+    assert compose_query("", "", "q q") == '"q q"'
+    assert compose_query("a", "x y", "p") == 'a "p" x y'
+    print("composer OK")
+    # 3. real search through core on temp docs
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="guitest_"))
+    (tmp / "alpha.txt").write_text("Annual Report quarterly results\n")
+    (tmp / "beta.md").write_text("budget forecast\n")
+    files, _ = core.iter_candidate_files(tmp, True, False,
+                                         set(core.DEFAULT_EXTS), 50 * 1024 * 1024)
+    assert len(files) == 2, files
+    groups = core.parse_query('"quarterly results" OR budget')
+    hits, warns, _ = core.search_by_content(
+        files, groups, False, 50 * 1024 * 1024, False)
+    assert len(hits) == 2, hits
+    assert warns == [], warns
+    print("core search OK")
+    # 4. wizard builds in every language
+    settings = load_settings()
+    for lang in LANGS:
+        settings["lang"] = lang
+        wiz = SearchWizard(core, settings, lambda _p: None)
+        assert wiz.pageIds(), lang
+        wiz.close()
+    print("wizard OK (4 languages)")
+    # 5. results window + worker end-to-end (offscreen)
+    settings["lang"] = "en"
+    params = {
+        "root": tmp, "recursive": True, "hidden": False,
+        "allowed": set(core.DEFAULT_EXTS),
+        "max_bytes": 50 * 1024 * 1024,
+        "name_q": None, "content_q": "annual",
+        "cs": False, "limit": 500, "lines": 3, "verbose_errors": False,
+    }
+    win = ResultsWindow(core, settings, params, "annual",
+                        on_new_search=lambda: None,
+                        on_lang_changed=lambda: None)
+    worker = SearchWorker(core, params)
+    got: dict = {}
+    worker.finished.connect(
+        lambda r, w, e: got.update(results=r, warnings=w, elapsed=e))
+    worker.run()  # synchronous in test
+    assert len(got["results"]) == 1, got
+    assert got["warnings"] == [], got
+    print("worker OK")
+    import shutil as _shutil
+    _shutil.rmtree(tmp, ignore_errors=True)
+    print("ALL GUI SELF-TESTS PASSED")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        return self_test()
+    if "--help" in argv or "-h" in argv:
+        print(f"{PROG} {VERSION} — graphical wizard for searcher.\n"
+              f"Usage: {PROG} [--self-test]\n"
+              f"Needs the 'searcher' program in the same folder and PyQt6.")
+        return 0
+    return GuiApp().run()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

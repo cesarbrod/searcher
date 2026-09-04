@@ -77,6 +77,36 @@ troubleshooting, and a cheat sheet:
 - [Español](docs/tutorial-es.md)
 - [Français](docs/tutorial-fr.md)
 
+## Graphical interface (extremely experimental)
+
+> ⚠️ **Warning: this GUI is extremely experimental.** It works, but expect
+> rough edges, untranslated wizard buttons, and little testing outside happy
+> paths. The terminal program above remains the stable, recommended way.
+
+`searcher-gui` is a point-and-click wizard wrapper around `searcher`: pick a
+folder, pick file types, describe what to find in plain fields, and browse
+results with previews. It runs on Wayland (native Qt platform) and X11.
+
+Requirements — **PyQt6 must be installed** (it is not bundled):
+
+```bash
+pip install PyQt6
+```
+
+Then, next to the `searcher` program:
+
+```bash
+chmod +x searcher-gui
+./searcher-gui
+```
+
+Notes:
+
+- On first run it asks for the interface language (English, Português,
+  Español, Français); the choice is saved and can be changed later in
+  Settings → Language.
+- No pre-built GUI binary is provided yet — run it from source as above.
+
 ## Usage
 
 ```bash
@@ -196,6 +226,7 @@ Skipped automatically: `__pycache__ .git .hg .svn node_modules .venv venv .tox .
 ```text
 searcher/
 ├── searcher            # the program (single file, executable)
+├── searcher-gui        # graphical wizard (needs PyQt6, extremely experimental)
 ├── README.md
 ├── prompt.md
 ├── dist/
