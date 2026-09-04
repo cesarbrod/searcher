@@ -13,7 +13,7 @@ Write a python program that will help me find document files (txt, md, pdf, docx
 | search string | result expected |
 | A | anything containing A |
 | A B | anything containing A AND B |
-| A OR B | anything containing A or B |
+| A OR B | anything containing A OR B |
 | "A A A" | the exact composed string |
 | "B B B" "A A A" | must contain the exact composed strings |
 | "B B B" OR "A A A" | must contain at least one of the two exact composed strings |
