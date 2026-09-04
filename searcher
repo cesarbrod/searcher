@@ -45,14 +45,20 @@ Examples:
 import argparse
 import os
 import re
+import shutil
 import sys
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-#import pypdf #uncomment this line if you install pypdf; added by human
+# import fontTools.pdfLib.pdfData # added by human
+try:
+    import pypdf  # added by human (optional: script works without it)
+except ImportError:
+    pypdf = None  # type: ignore[assignment]
 
 PROG = "searcher"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Supported extensions
@@ -294,43 +300,88 @@ def _extract_pdf_fallback(path: Path) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _mute_noisy_pdf_loggers() -> None:
+    """pypdf/PyPDF2/pdfminer log one warning per malformed object straight to
+    stderr ('invalid pdf header', 'EOF marker not found', bad floats, ...).
+    When scanning hundreds of PDFs that spam is pure noise, so raise their
+    log level. Idempotent — safe to call on every file."""
+    import logging
+    for _name in ("pypdf", "PyPDF2", "pdfminer", "pdfminer.high_level"):
+        try:
+            logging.getLogger(_name).setLevel(logging.CRITICAL)
+        except Exception:
+            pass
+
+
+def _pypdf_available() -> bool:
+    """Cached check: is a quality PDF backend importable?"""
+    if _pypdf_available.cached is None:  # type: ignore[attr-defined]
+        try:
+            import pypdf  # noqa: F401  # type: ignore
+            _pypdf_available.cached = True  # type: ignore[attr-defined]
+        except ImportError:
+            _pypdf_available.cached = False  # type: ignore[attr-defined]
+    return _pypdf_available.cached  # type: ignore[attr-defined]
+
+
+_pypdf_available.cached = None  # type: ignore[attr-defined]
+
+
 def _extract_pdf(path: Path) -> tuple[str, str]:
-    """Return (text, backend_used). Tries pypdf -> pdfminer -> PyPDF2 -> fallback."""
-    # pypdf (modern)
-    try:
-        from pypdf import PdfReader  # type: ignore
-        reader = PdfReader(str(path))
-        pages = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n".join(pages).strip()
+    """Return (text, backend_used). Tries pypdf -> pdfminer -> PyPDF2 -> fallback.
+
+    Never raises and never logs: corrupt/encrypted/non-PDF files quietly
+    yield ("", "unreadable") so the caller can skip them.
+    """
+    import warnings
+
+    _mute_noisy_pdf_loggers()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # pypdf (modern)
+        try:
+            from pypdf import PdfReader  # type: ignore
+            reader = PdfReader(str(path))
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    return "", "unreadable"
+            text = "\n".join((p.extract_text() or "") for p in reader.pages).strip()
+            if text:
+                return text, "pypdf"
+        except Exception:
+            pass
+        # pdfminer.six
+        try:
+            from pdfminer.high_level import extract_text as pm_extract  # type: ignore
+            text = (pm_extract(str(path)) or "").strip()
+            if text:
+                return text, "pdfminer"
+        except Exception:
+            pass
+        # legacy PyPDF2
+        try:
+            from PyPDF2 import PdfReader as OldReader  # type: ignore
+            reader = OldReader(str(path))
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    return "", "unreadable"
+            text = "\n".join((p.extract_text() or "") for p in reader.pages).strip()
+            if text:
+                return text, "PyPDF2"
+        except Exception:
+            pass
+        # crude stdlib fallback — must never raise
+        try:
+            text = _extract_pdf_fallback(path)
+        except Exception:
+            text = ""
         if text:
-            return text, "pypdf"
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    # pdfminer.six
-    try:
-        from pdfminer.high_level import extract_text as pm_extract  # type: ignore
-        text = (pm_extract(str(path)) or "").strip()
-        if text:
-            return text, "pdfminer"
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    # legacy PyPDF2
-    try:
-        from PyPDF2 import PdfReader as OldReader  # type: ignore
-        reader = OldReader(str(path))
-        pages = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n".join(pages).strip()
-        if text:
-            return text, "PyPDF2"
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    return _extract_pdf_fallback(path), "fallback"
+            return text, "fallback"
+    return "", "unreadable"
 
 
 def extract_text(path: Path, max_bytes: int = 50 * 1024 * 1024) -> tuple[str, str]:
@@ -350,6 +401,74 @@ def extract_text(path: Path, max_bytes: int = 50 * 1024 * 1024) -> tuple[str, st
 
 
 # ---------------------------------------------------------------------------
+# Status bar — transient single-line progress on stderr
+# ---------------------------------------------------------------------------
+
+class StatusBar:
+    """Progress hint while the search runs.
+
+    Writes a single updating line to stderr (stdout stays clean for piping
+    and --count). Automatically disabled with --quiet or when stderr is not
+    a terminal, so logs and scripts see no control characters.
+    """
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = bool(enabled) and sys.stderr.isatty()
+        self._last_len = 0
+        self._last_t = 0.0
+        self._t0 = time.perf_counter()
+
+    def _write(self, msg: str, force: bool = False) -> None:
+        if not self.enabled:
+            return
+        now = time.perf_counter()
+        if not force and (now - self._last_t) < 0.1:
+            return  # throttle: at most ~10 redraws/sec
+        self._last_t = now
+        try:
+            width = shutil.get_terminal_width().columns
+        except Exception:
+            width = 80
+        msg = msg[: max(0, width - 1)]
+        pad = " " * max(0, self._last_len - len(msg))
+        sys.stderr.write("\r" + msg + pad)
+        sys.stderr.flush()
+        self._last_len = len(msg)
+
+    def phase(self, label: str) -> None:
+        """Show a phase label, e.g. 'scanning files'."""
+        self._write(f"searcher: {label}...", force=True)
+
+    def scanning(self, n: int) -> None:
+        self._write(f"searcher: scanning files... {n} found")
+
+    def searching(self, done: int, total: int, name: str, width: int = 24) -> None:
+        frac = min(1.0, done / max(1, total))
+        filled = int(width * frac)
+        bar = f"[{'#' * filled}{'.' * (width - filled)}]"
+        short = name if len(name) <= 36 else "..." + name[-33:]
+        self._write(
+            f"searcher: {bar} {done}/{total} ({frac * 100:3.0f}%) {short}",
+            force=(done >= total),
+        )
+
+    def clear(self) -> None:
+        """Erase the status line (call before printing results)."""
+        if not self.enabled:
+            return
+        sys.stderr.write("\r" + " " * self._last_len + "\r")
+        sys.stderr.flush()
+        self._last_len = 0
+
+    def done(self, msg: str) -> None:
+        """Erase the bar and print a one-line summary with elapsed time."""
+        elapsed = time.perf_counter() - self._t0
+        self.clear()
+        if self.enabled:
+            print(f"searcher: {msg} ({elapsed:.1f}s)", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # File iteration
 # ---------------------------------------------------------------------------
 
@@ -366,7 +485,8 @@ def parse_ext_list(raw: str | None) -> set[str] | None:
 
 def iter_candidate_files(root: Path, recursive: bool, include_hidden: bool,
                          allowed_exts: set[str] | None,
-                         max_bytes: int) -> tuple[list[Path], list[str]]:
+                         max_bytes: int,
+                         progress: "StatusBar | None" = None) -> tuple[list[Path], list[str]]:
     """Walk root, return (files, warnings)."""
     files: list[Path] = []
     warnings: list[str] = []
@@ -398,6 +518,8 @@ def iter_candidate_files(root: Path, recursive: bool, include_hidden: bool,
                 except OSError:
                     continue
                 files.append(fp)
+                if progress is not None:
+                    progress.scanning(len(files))
     else:
         for fp in sorted(root.iterdir()):
             if not fp.is_file():
@@ -412,6 +534,8 @@ def iter_candidate_files(root: Path, recursive: bool, include_hidden: bool,
             except OSError:
                 continue
             files.append(fp)
+            if progress is not None:
+                progress.scanning(len(files))
     return files, warnings
 
 
@@ -426,14 +550,17 @@ def search_by_name(files: list[Path], groups: list[list[str]],
 
 def search_by_content(files: list[Path], groups: list[list[str]],
                       case_sensitive: bool, max_bytes: int,
-                      verbose_errors: bool = False
+                      verbose_errors: bool = False,
+                      progress: "StatusBar | None" = None
                       ) -> tuple[list[tuple[Path, str]], list[str], bool]:
     """Return ((path,text) hits, warnings, used_pdf_fallback)."""
     hits: list[tuple[Path, str]] = []
     warnings: list[str] = []
     used_fallback = False
-    warned_pdf = False
-    for fp in files:
+    total_files = len(files)
+    for i, fp in enumerate(files):
+        if progress is not None:
+            progress.searching(i + 1, total_files, fp.name)
         ext = fp.suffix.lower().lstrip(".")
         if ext == "doc":
             warnings.append(f"skip {fp}: legacy .doc not supported (convert to .docx)")
@@ -444,13 +571,20 @@ def search_by_content(files: list[Path], groups: list[list[str]],
             if verbose_errors:
                 warnings.append(f"skip {fp}: cannot read ({e})")
             continue
+        if backend == "unreadable":
+            if verbose_errors:
+                warnings.append(
+                    f"skip {fp}: no extractable text "
+                    f"(corrupt, scanned-image or encrypted PDF)"
+                )
+            continue
         if backend == "fallback":
             used_fallback = True
-        if backend == "fallback" and not warned_pdf:
-            warned_pdf = True  # summarised once below instead of per file
         if text and match_text(text, groups, case_sensitive):
             hits.append((fp, text))
-    if warned_pdf:
+    # Only suggest installing pypdf when it is actually missing; corrupt
+    # files fall through to the crude extractor even with pypdf installed.
+    if used_fallback and not _pypdf_available():
         warnings.append(
             "PDF fallback extractor in use (crude). "
             "For better PDF results: pip install pypdf"
@@ -531,6 +665,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Print absolute paths (default: relative to PATH)")
     p.add_argument("--errors", action="store_true",
                    help="Show per-file read/parse warnings")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="Suppress the live status bar and summary")
     p.add_argument("--version", action="version", version=f"{PROG} {VERSION}")
     return p
 
@@ -562,6 +698,16 @@ def resolve_queries(args) -> tuple[str | None, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to cp1252/cp437 which cannot encode the
+    # box-drawing characters (─ │) used in output. Switch stdout/stderr
+    # to UTF-8 so the program never crashes there; on other platforms
+    # this is a harmless no-op.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -596,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     max_bytes = int(args.max_size * 1024 * 1024)
     custom_exts = parse_ext_list(args.ext)
     recursive = not args.no_recursive
+    status = StatusBar(enabled=not args.quiet)
 
     # Name search: any file unless --ext restricts.
     # Content search: default document set (+ code with --all-text) unless --ext.
@@ -614,20 +761,25 @@ def main(argv: list[str] | None = None) -> int:
             name_files = [root]
             content_files = [root]
         else:
+            status.phase("scanning files")
             # Single walk when both filters agree, else two walks.
             if content_q and not name_q:
                 files, _ = iter_candidate_files(root, recursive, args.hidden,
-                                                content_allowed, max_bytes)
+                                                content_allowed, max_bytes,
+                                                progress=status)
                 content_files, name_files = files, files
             elif name_q and not content_q:
                 files, _ = iter_candidate_files(root, recursive, args.hidden,
-                                                name_allowed, max_bytes)
+                                                name_allowed, max_bytes,
+                                                progress=status)
                 content_files, name_files = files, files
             else:
                 name_files, _ = iter_candidate_files(root, recursive, args.hidden,
-                                                     name_allowed, max_bytes)
+                                                     name_allowed, max_bytes,
+                                                     progress=status)
                 content_files, _ = iter_candidate_files(root, recursive, args.hidden,
-                                                        content_allowed, max_bytes)
+                                                        content_allowed, max_bytes,
+                                                        progress=status)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -641,24 +793,31 @@ def main(argv: list[str] | None = None) -> int:
         name_hits = set(search_by_name(name_files, name_groups, cs))
 
     results: list[tuple[Path, str | None]] = []  # (path, content|None)
+    searched = 0
     if content_q and name_q:
         # Both must match: content-search only within name hits.
         subset = [f for f in content_files if f in name_hits]
+        searched = len(subset)
         hits, w, _ = search_by_content(subset, content_groups, cs,
-                                       max_bytes, args.errors)
+                                       max_bytes, args.errors,
+                                       progress=status)
         warnings.extend(w)
         results = [(p, t) for p, t in hits]
     elif content_q:
+        searched = len(content_files)
         hits, w, _ = search_by_content(content_files, content_groups, cs,
-                                       max_bytes, args.errors)
+                                       max_bytes, args.errors,
+                                       progress=status)
         warnings.extend(w)
         results = [(p, t) for p, t in hits]
     else:
+        searched = len(name_files)
         results = [(p, None) for p in sorted(name_hits)]
 
     results.sort(key=lambda r: str(r[0]).lower())
     total = len(results)
     shown = results[:args.limit] if args.limit and args.limit > 0 else results
+    status.clear()
 
     def display(p: Path) -> str:
         try:
@@ -672,6 +831,7 @@ def main(argv: list[str] | None = None) -> int:
             return str(p)
 
     if args.count:
+        status.done(f"{total} match(es) in {searched} file(s)")
         print(total)
         return 0 if total else 1
 
@@ -696,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(SEPARATOR)
     print(f"{total} match(es)" + (f" (showing {len(shown)})" if len(shown) != total else ""))
+    status.done(f"{total} match(es) in {searched} file(s)")
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
     return 0 if total else 1
