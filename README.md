@@ -61,6 +61,13 @@ Optionally put it on your `PATH`:
 ln -s "$PWD/searcher" ~/.local/bin/searcher
 ```
 
+Pre-built binaries are in `dist/`:
+
+| File | Platform | Notes |
+|---|---|---|
+| `dist/searcher` | Linux x86-64 | No Python needed, `pypdf` baked in |
+| `dist/searcher.exe` | Windows x86-64 | No Python needed, `pypdf` baked in; run from `cmd` or PowerShell |
+
 ## Usage
 
 ```bash
