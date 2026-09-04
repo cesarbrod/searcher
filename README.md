@@ -49,7 +49,7 @@ Optional — better PDF extraction (less performance):
 ```bash
 pip install pypdf fonttools
 ```
-Remove the leading # from the line
+then remove the leading # from the line
 
 `#import pypdf`
 
