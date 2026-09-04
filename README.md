@@ -186,9 +186,11 @@ searcher/
 ├── searcher            # the program (single file, executable)
 ├── README.md
 ├── prompt.md
-└── dist/
-    ├── searcher        # Linux x86-64 binary (pypdf baked in)
-    ├── searcher.exe    # Windows x86-64 binary (pypdf baked in)
+├── dist/
+│   ├── searcher        # Linux x86-64 binary (pypdf baked in)
+│   └── searcher.exe    # Windows x86-64 binary (pypdf baked in)
+└── docs/
+    └── tutorial.md     # beginner tutorial (Linux, find/locate/grep comparison)
 ```
 
 ## License
