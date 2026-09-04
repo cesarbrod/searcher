@@ -51,7 +51,6 @@ import time
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-# import fontTools.pdfLib.pdfData # added by human
 try:
     import pypdf  # added by human (optional: script works without it)
 except ImportError:
@@ -59,6 +58,7 @@ except ImportError:
 
 PROG = "searcher"
 VERSION = "1.1.0"
+AUTHOR = "Cesar Brod"
 
 # ---------------------------------------------------------------------------
 # Supported extensions
