@@ -9,7 +9,7 @@ Single-file Python program. No build step. Works out of the box for `txt`, `md`,
 - Search **by content**, **by file name**, or both combined (AND).
 - Expressive query syntax: `AND`, `OR`, exact `"phrases"`.
 - Content extraction with **standard library only** — no mandatory dependencies.
-- Optional `pypdf` support for higher-quality PDF text extraction.
+- Optional `pypdf` support for higher-quality PDF text extraction, longer processing time.
 - Snippet previews with matched terms highlighted.
 - Recursive search with sensible skips (`.git`, `venv`, `__pycache__`, …).
 - Script-friendly: exit codes, `--count`, `--limit`, `--absolute`.
@@ -44,10 +44,10 @@ chmod +x searcher
 ./searcher --help
 ```
 
-Optional — better PDF extraction:
+Optional — better PDF extraction (less performance):
 
 ```bash
-pip install pypdf
+pip install pypdf fonttools
 ```
 
 Optionally put it on your `PATH`:
