@@ -189,7 +189,6 @@ searcher/
 └── dist/
     ├── searcher        # Linux x86-64 binary (pypdf baked in)
     ├── searcher.exe    # Windows x86-64 binary (pypdf baked in)
-    └── delme            # placeholder file
 ```
 
 ## License
