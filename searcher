@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""
+searcher — find document files by name or content.
+
+Usage:
+  searcher [PATH] [QUERY] [options]
+  searcher [PATH] --name QUERY
+  searcher [PATH] --content QUERY
+  searcher [PATH] --name NAME_Q --content CONTENT_Q   (both must match)
+
+Query syntax (content AND name):
+  A                  anything containing A
+  A B                anything containing A AND B
+  A OR B             anything containing A or B
+  "A A A"            the exact composed string
+  "B B B" "A A A"    must contain both exact strings (AND)
+  "B B B" OR "A A A" must contain at least one of them (OR)
+
+  Matching is case-insensitive by default. Use --case-sensitive for exact case.
+  A bare word "OR" (any case) is the OR operator — to search the literal
+  word "or", quote it: '"or"'.
+
+Supported formats for content search:
+  Plain text (no dependency): txt md markdown rst log csv tsv json yaml yml
+    toml ini cfg xml html htm xhtml tex org adoc asciidoc + source code
+    (py js ts sh java c h cpp go rs rb php css sql ...) read as text.
+  Office Open XML via stdlib zip+xml (no dependency): docx pptx xlsx
+  OpenDocument via stdlib: odt / ods / odp
+  EPUB via stdlib: epub
+  RTF via regex stripper (stdlib): rtf
+  PDF: uses pypdf if installed, else pdfminer/PyPDF2, else a crude
+    stdlib fallback. For best PDF results:  pip install pypdf
+  Legacy .doc (OLE binary): not supported — skipped with a warning
+    (convert to .docx first). Install LibreOffice for conversion.
+
+Examples:
+  searcher . "annual report"
+  searcher ~/docs "budget OR forecast"
+  searcher ~/docs --name "report 2024"
+  searcher ~/docs --content '"quarterly results" OR "annual summary"'
+  searcher ~/docs -n invoice -s "paid OR overdue" --ext pdf,docx
+  searcher . "TODO" --all-text --no-recursive
+"""
+
+import argparse
+import os
+import re
+import sys
+import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+# import fontTools.pdfLib.pdfData # added by human
+import pypdf #added by human
+
+PROG = "searcher"
+VERSION = "1.0.0"
+
+# ---------------------------------------------------------------------------
+# Supported extensions
+# ---------------------------------------------------------------------------
+
+# Read directly as text (tried as utf-8 / latin-1 fallback).
+TEXT_EXTS = frozenset({
+    "txt", "md", "markdown", "rst", "log", "csv", "tsv",
+    "json", "yaml", "yml", "toml", "ini", "cfg", "conf",
+    "xml", "html", "htm", "xhtml", "tex", "org",
+    "adoc", "asciidoc", "textile",
+    # source code / scripts are plain text too
+    "py", "pyi", "js", "ts", "tsx", "jsx", "sh", "bash", "zsh",
+    "java", "c", "h", "cpp", "hpp", "cs", "go", "rs", "rb",
+    "php", "css", "scss", "sql", "r", "pl", "lua", "vim",
+})
+
+# Document formats with dedicated extractors (stdlib-based).
+DOC_EXTS = frozenset({"pdf", "docx", "odt", "rtf", "epub", "pptx", "xlsx", "ods", "odp"})
+
+# Default content-search set: user documents (not source code).
+DEFAULT_EXTS = frozenset({
+    "txt", "md", "markdown", "rst", "log", "csv", "tsv",
+    "json", "yaml", "yml", "toml", "ini",
+    "xml", "html", "htm", "tex", "org", "adoc", "asciidoc",
+    "pdf", "docx", "odt", "ods", "odp", "rtf", "epub", "pptx", "xlsx",
+})
+
+# Extra text-ish extensions enabled with --all-text.
+ALL_TEXT_EXTRA = frozenset({
+    "py", "pyi", "js", "ts", "tsx", "jsx", "sh", "bash", "zsh",
+    "java", "c", "h", "cpp", "hpp", "cs", "go", "rs", "rb",
+    "php", "css", "scss", "sql", "r", "pl", "lua", "vim",
+    "cfg", "conf", "xhtml", "textile",
+})
+
+SKIP_DIRS = frozenset({
+    "__pycache__", ".git", ".hg", ".svn", "node_modules",
+    ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
+})
+
+SEPARATOR = "─" * 72
+
+
+# ---------------------------------------------------------------------------
+# Query parsing — implements the required truth table
+# ---------------------------------------------------------------------------
+
+def parse_query(query: str) -> list[list[str]]:
+    """Split query into OR-groups of AND-terms.
+
+    Returns e.g. 'A B' -> [['A','B']],  'A OR B' -> [['A'],['B']],
+    '"x y" "z" OR "w"' -> [['x y','z'],['w']].
+    A bare OR (any case) separates groups. Quoted text is one exact term.
+    """
+    token_re = re.compile(r'"([^"]+)"|(\bOR\b)|(\S+)', re.IGNORECASE)
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for m in token_re.finditer(query):
+        phrase, or_op, word = m.group(1), m.group(2), m.group(3)
+        if or_op is not None:
+            if current:
+                groups.append(current)
+            current = []
+        elif phrase is not None:
+            if phrase:
+                current.append(phrase)
+        elif word is not None:
+            current.append(word)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def match_text(text: str, groups: list[list[str]], case_sensitive: bool = False) -> bool:
+    """True if text satisfies the parsed query (OR of ANDs, substring match)."""
+    if not groups:
+        return False
+    hay = text if case_sensitive else text.lower()
+    for and_terms in groups:
+        ok = True
+        for term in and_terms:
+            needle = term if case_sensitive else term.lower()
+            if needle not in hay:
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
+def find_matching_lines(text: str, groups: list[list[str]],
+                        case_sensitive: bool = False) -> list[int]:
+    """Return 0-based line numbers whose line matches at least one AND-group.
+
+    A line 'matches' a group if it contains every term of the group; lines
+    matching any group are returned. Used for snippets.
+    """
+    out: list[int] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if match_text(line, groups, case_sensitive):
+            out.append(i)
+    if out:
+        return out
+    # Terms spread across lines: show lines containing ANY individual term.
+    all_terms = [t for g in groups for t in g]
+    for i, line in enumerate(lines):
+        cmp_line = line if case_sensitive else line.lower()
+        if any((t if case_sensitive else t.lower()) in cmp_line for t in all_terms):
+            out.append(i)
+    if out:
+        return out
+    # Last resort: first non-empty line so we still show a snippet.
+    if match_text(text, groups, case_sensitive):
+        for i, line in enumerate(lines):
+            if line.strip():
+                return [i]
+        return [0] if lines else []
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Text extraction
+# ---------------------------------------------------------------------------
+
+def _read_plain_text(path: Path, max_bytes: int) -> str:
+    with open(path, "rb") as f:
+        raw = f.read(max_bytes)
+    for enc in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _xml_texts(root: ET.Element) -> list[str]:
+    """Collect non-empty text from all XML nodes (namespace-agnostic)."""
+    out: list[str] = []
+    for el in root.iter():
+        if el.text and el.text.strip():
+            out.append(el.text.strip())
+        if el.tail and el.tail.strip():
+            out.append(el.tail.strip())
+    return out
+
+
+def _extract_office_open_xml(path: Path) -> str:
+    """Extract text from docx/pptx/xlsx via zip + XML (stdlib only)."""
+    parts: list[str] = []
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            # document content lives in these; skip rels/media/props
+            if not (name.endswith(".xml") and (
+                    "word/" in name or "ppt/" in name or "xl/sharedStrings" in name
+                    or "xl/worksheets" in name or name == "xl/workbook.xml")):
+                continue
+            try:
+                root = ET.fromstring(z.read(name))
+            except ET.ParseError:
+                continue
+            parts.extend(_xml_texts(root))
+    return "\n".join(parts)
+
+
+def _extract_odf(path: Path) -> str:
+    """Extract text from odt/ods/odp (content.xml inside the zip)."""
+    with zipfile.ZipFile(path) as z:
+        try:
+            data = z.read("content.xml")
+        except KeyError:
+            return ""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return ""
+    return "\n".join(_xml_texts(root))
+
+
+def _extract_epub(path: Path) -> str:
+    """Extract readable text from EPUB (xhtml/html inside the zip)."""
+    parts: list[str] = []
+    tag_re = re.compile(r"<[^>]+>")
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            if not name.lower().endswith((".xhtml", ".html", ".htm", ".xml", ".opf")):
+                continue
+            try:
+                raw = z.read(name).decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            raw = re.sub(r"(?s)<(script|style).*?</\1>", " ", raw)
+            text = tag_re.sub(" ", raw)
+            text = re.sub(r"[ \t\xa0]+", " ", text)
+            if text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _extract_rtf(path: Path) -> str:
+    raw = _read_plain_text(path, 50 * 1024 * 1024)
+    # Drop font/color tables and other {} groups that are pure control words.
+    text = re.sub(r"(?s)\{\\fonttbl.*?\}", " ", raw)
+    text = re.sub(r"(?s)\{\\colortbl.*?\}", " ", raw)
+    text = re.sub(r"(?s)\{\\\*\\.*?\}", " ", text)
+    text = re.sub(r"\\[a-zA-Z]+\d* ?", " ", text)   # \b \par \fs24 ...
+    text = re.sub(r"[{}]", " ", text)
+    text = re.sub(r"\\'([0-9a-fA-F]{2})", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def _extract_pdf_fallback(path: Path) -> str:
+    """Crude stdlib PDF text grab: parenthesised strings + hex strings."""
+    with open(path, "rb") as f:
+        raw = f.read(100 * 1024 * 1024)
+    try:
+        latin = raw.decode("latin-1")
+    except Exception:
+        return ""
+    chunks: list[str] = []
+    for m in re.finditer(r"\((?:\\.|[^\\()])*\)", latin):
+        s = m.group(0)[1:-1]
+        s = s.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+        s = re.sub(r"\\(.)", r"\1", s)
+        if len(s.strip()) >= 2:
+            chunks.append(s.strip())
+    for m in re.finditer(r"<([0-9A-Fa-f]{4,})>", latin):
+        hx = m.group(1)
+        try:
+            s = bytes.fromhex(hx).decode("utf-16-be", errors="ignore")
+        except ValueError:
+            continue
+        s = "".join(c for c in s if c.isprint() or c in " \t")
+        if len(s.strip()) >= 2:
+            chunks.append(s.strip())
+    text = " ".join(chunks)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_pdf(path: Path) -> tuple[str, str]:
+    """Return (text, backend_used). Tries pypdf -> pdfminer -> PyPDF2 -> fallback."""
+    # pypdf (modern)
+    try:
+        from pypdf import PdfReader  # type: ignore
+        reader = PdfReader(str(path))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+        text = "\n".join(pages).strip()
+        if text:
+            return text, "pypdf"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    # pdfminer.six
+    try:
+        from pdfminer.high_level import extract_text as pm_extract  # type: ignore
+        text = (pm_extract(str(path)) or "").strip()
+        if text:
+            return text, "pdfminer"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    # legacy PyPDF2
+    try:
+        from PyPDF2 import PdfReader as OldReader  # type: ignore
+        reader = OldReader(str(path))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+        text = "\n".join(pages).strip()
+        if text:
+            return text, "PyPDF2"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return _extract_pdf_fallback(path), "fallback"
+
+
+def extract_text(path: Path, max_bytes: int = 50 * 1024 * 1024) -> tuple[str, str]:
+    """Extract searchable text. Returns (text, backend). Raises on failure."""
+    ext = path.suffix.lower().lstrip(".")
+    if ext in ("docx", "pptx", "xlsx"):
+        return _extract_office_open_xml(path), "zip+xml"
+    if ext in ("odt", "ods", "odp"):
+        return _extract_odf(path), "odf"
+    if ext == "epub":
+        return _extract_epub(path), "epub"
+    if ext == "rtf":
+        return _extract_rtf(path), "rtf-strip"
+    if ext == "pdf":
+        return _extract_pdf(path)
+    return _read_plain_text(path, max_bytes), "plain"
+
+
+# ---------------------------------------------------------------------------
+# File iteration
+# ---------------------------------------------------------------------------
+
+def parse_ext_list(raw: str | None) -> set[str] | None:
+    if not raw:
+        return None
+    exts: set[str] = set()
+    for token in re.split(r"[,\s;|]+", raw):
+        token = token.strip().lower().lstrip(".")
+        if token:
+            exts.add(token)
+    return exts or None
+
+
+def iter_candidate_files(root: Path, recursive: bool, include_hidden: bool,
+                         allowed_exts: set[str] | None,
+                         max_bytes: int) -> tuple[list[Path], list[str]]:
+    """Walk root, return (files, warnings)."""
+    files: list[Path] = []
+    warnings: list[str] = []
+    if root.is_file():
+        files.append(root)
+        return files, warnings
+    if not root.is_dir():
+        raise FileNotFoundError(f"path not found: {root}")
+
+    def is_hidden(p: Path) -> bool:
+        return any(part.startswith(".") for part in p.parts)
+
+    if recursive:
+        for dirpath, dirnames, filenames in os.walk(root):
+            # prune heavy/hidden dirs in place
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if d not in SKIP_DIRS and (include_hidden or not d.startswith("."))
+            )
+            for fn in sorted(filenames):
+                fp = Path(dirpath) / fn
+                if not include_hidden and (fn.startswith(".") or is_hidden(fp.relative_to(root))):
+                    continue
+                if allowed_exts is not None and fp.suffix.lower().lstrip(".") not in allowed_exts:
+                    continue
+                try:
+                    if fp.stat().st_size > max_bytes:
+                        continue
+                except OSError:
+                    continue
+                files.append(fp)
+    else:
+        for fp in sorted(root.iterdir()):
+            if not fp.is_file():
+                continue
+            if not include_hidden and fp.name.startswith("."):
+                continue
+            if allowed_exts is not None and fp.suffix.lower().lstrip(".") not in allowed_exts:
+                continue
+            try:
+                if fp.stat().st_size > max_bytes:
+                    continue
+            except OSError:
+                continue
+            files.append(fp)
+    return files, warnings
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+def search_by_name(files: list[Path], groups: list[list[str]],
+                   case_sensitive: bool) -> list[Path]:
+    return [f for f in files if match_text(f.name, groups, case_sensitive)]
+
+
+def search_by_content(files: list[Path], groups: list[list[str]],
+                      case_sensitive: bool, max_bytes: int,
+                      verbose_errors: bool = False
+                      ) -> tuple[list[tuple[Path, str]], list[str], bool]:
+    """Return ((path,text) hits, warnings, used_pdf_fallback)."""
+    hits: list[tuple[Path, str]] = []
+    warnings: list[str] = []
+    used_fallback = False
+    warned_pdf = False
+    for fp in files:
+        ext = fp.suffix.lower().lstrip(".")
+        if ext == "doc":
+            warnings.append(f"skip {fp}: legacy .doc not supported (convert to .docx)")
+            continue
+        try:
+            text, backend = extract_text(fp, max_bytes)
+        except Exception as e:
+            if verbose_errors:
+                warnings.append(f"skip {fp}: cannot read ({e})")
+            continue
+        if backend == "fallback":
+            used_fallback = True
+        if backend == "fallback" and not warned_pdf:
+            warned_pdf = True  # summarised once below instead of per file
+        if text and match_text(text, groups, case_sensitive):
+            hits.append((fp, text))
+    if warned_pdf:
+        warnings.append(
+            "PDF fallback extractor in use (crude). "
+            "For better PDF results: pip install pypdf"
+        )
+    return hits, warnings, used_fallback
+
+
+def print_snippet(text: str, line_idx: list[int], n_lines: int,
+                  groups: list[list[str]], case_sensitive: bool) -> None:
+    """Print up to n_lines matching lines with the matched terms highlighted."""
+    lines = text.splitlines()
+    shown = 0
+    for i in line_idx:
+        if shown >= n_lines:
+            break
+        line = lines[i].strip() if 0 <= i < len(lines) else ""
+        if not line:
+            continue
+        if len(line) > 500:
+            line = line[:497] + "…"
+        # highlight every matched term with *…* (plain-terminal safe)
+        for and_terms in groups:
+            for term in and_terms:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                try:
+                    line = re.sub(f"({re.escape(term)})", r"*\1*",
+                                  line, flags=flags)
+                except re.error:
+                    pass
+        print(f"    │ {line}")
+        shown += 1
+    if len(line_idx) > shown:
+        print(f"    │ … ({len(line_idx) - shown} more matching line(s))")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=PROG,
+        description="Find document files by name or content. "
+                    'Query: "A B"=AND, "A OR B"=OR, \'"phrase"\'=exact.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("path", nargs="?", default=".",
+                   help="Directory or file to search (default: .)")
+    p.add_argument("query", nargs="?", default=None,
+                   help="Search query (used as --content unless --name is given)")
+    p.add_argument("-n", "--name", metavar="QUERY", default=None,
+                   help="Search by file name instead of content")
+    p.add_argument("-s", "--content", "-c", metavar="QUERY", default=None,
+                   dest="content",
+                   help="Search inside file content")
+    p.add_argument("--ext", metavar="E1,E2", default=None,
+                   help="Restrict to extensions, e.g. --ext pdf,docx,txt,md")
+    p.add_argument("--all-text", action="store_true",
+                   help="Also include source-code extensions for content search")
+    p.add_argument("--list-exts", action="store_true",
+                   help="List supported extensions and exit")
+    p.add_argument("--case-sensitive", action="store_true",
+                   help="Case-sensitive matching (default: insensitive)")
+    p.add_argument("--no-recursive", action="store_true",
+                   help="Do not descend into subdirectories")
+    p.add_argument("--hidden", action="store_true",
+                   help="Include hidden files/dirs")
+    p.add_argument("--max-size", type=float, default=50, metavar="MB",
+                   help="Skip files larger than this (default: 50 MB)")
+    p.add_argument("--lines", type=int, default=2, metavar="N",
+                   help="Snippet lines per content hit (default: 2, 0=none)")
+    p.add_argument("--limit", type=int, default=0, metavar="N",
+                   help="Show at most N results (default: all)")
+    p.add_argument("--count", action="store_true",
+                   help="Only print the match count")
+    p.add_argument("--absolute", action="store_true",
+                   help="Print absolute paths (default: relative to PATH)")
+    p.add_argument("--errors", action="store_true",
+                   help="Show per-file read/parse warnings")
+    p.add_argument("--version", action="version", version=f"{PROG} {VERSION}")
+    return p
+
+
+def resolve_queries(args) -> tuple[str | None, str | None]:
+    """Return (name_query, content_query)."""
+    name_q = args.name
+    content_q = args.content
+    if args.query:
+        if name_q and not content_q:
+            # searcher --name X "Y"  -> name=X, content=Y
+            content_q = args.query
+        elif content_q and not name_q:
+            pass  # explicit --content plus stray positional: ignore positional?
+            # Actually treat stray positional as nothing to avoid confusion;
+            # prefer explicit flags.
+            print(f"warning: ignoring extra positional query {args.query!r} "
+                  f"(already have --content)", file=sys.stderr)
+        elif not name_q and not content_q:
+            # Bare query: default to content search.
+            if args.name is not None:  # -n without value is impossible; keep safe
+                name_q = args.query
+            else:
+                content_q = args.query
+        else:
+            print(f"warning: ignoring extra positional query {args.query!r}",
+                  file=sys.stderr)
+    return name_q, content_q
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.list_exts:
+        print("Content-search extensions (default set):")
+        print("  " + ", ".join(sorted(DEFAULT_EXTS)))
+        print("Additional with --all-text:")
+        print("  " + ", ".join(sorted(ALL_TEXT_EXTRA - DEFAULT_EXTS)))
+        print("Note: legacy .doc is NOT supported (convert to .docx).")
+        return 0
+
+    name_q, content_q = resolve_queries(args)
+    if not name_q and not content_q:
+        parser.print_help(sys.stderr)
+        print("\nerror: provide a QUERY and/or --name/--content", file=sys.stderr)
+        return 2
+
+    name_groups = parse_query(name_q) if name_q else []
+    content_groups = parse_query(content_q) if content_q else []
+    if name_q and not name_groups:
+        print("error: empty --name query", file=sys.stderr)
+        return 2
+    if content_q and not content_groups:
+        print("error: empty content query", file=sys.stderr)
+        return 2
+
+    root = Path(args.path).expanduser()
+    if not root.exists():
+        print(f"error: path not found: {root}", file=sys.stderr)
+        return 2
+
+    max_bytes = int(args.max_size * 1024 * 1024)
+    custom_exts = parse_ext_list(args.ext)
+    recursive = not args.no_recursive
+
+    # Name search: any file unless --ext restricts.
+    # Content search: default document set (+ code with --all-text) unless --ext.
+    if custom_exts is not None:
+        name_allowed: set[str] | None = custom_exts
+        content_allowed: set[str] | None = custom_exts
+    elif args.all_text:
+        content_allowed = set(DEFAULT_EXTS) | set(ALL_TEXT_EXTRA)
+        name_allowed = None
+    else:
+        content_allowed = set(DEFAULT_EXTS)
+        name_allowed = None
+
+    try:
+        if root.is_file():
+            name_files = [root]
+            content_files = [root]
+        else:
+            # Single walk when both filters agree, else two walks.
+            if content_q and not name_q:
+                files, _ = iter_candidate_files(root, recursive, args.hidden,
+                                                content_allowed, max_bytes)
+                content_files, name_files = files, files
+            elif name_q and not content_q:
+                files, _ = iter_candidate_files(root, recursive, args.hidden,
+                                                name_allowed, max_bytes)
+                content_files, name_files = files, files
+            else:
+                name_files, _ = iter_candidate_files(root, recursive, args.hidden,
+                                                     name_allowed, max_bytes)
+                content_files, _ = iter_candidate_files(root, recursive, args.hidden,
+                                                        content_allowed, max_bytes)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    cs = args.case_sensitive
+    warnings: list[str] = []
+
+    # --name filter first (narrows candidates for combined search)
+    name_hits: set[Path] = set(name_files)
+    if name_q:
+        name_hits = set(search_by_name(name_files, name_groups, cs))
+
+    results: list[tuple[Path, str | None]] = []  # (path, content|None)
+    if content_q and name_q:
+        # Both must match: content-search only within name hits.
+        subset = [f for f in content_files if f in name_hits]
+        hits, w, _ = search_by_content(subset, content_groups, cs,
+                                       max_bytes, args.errors)
+        warnings.extend(w)
+        results = [(p, t) for p, t in hits]
+    elif content_q:
+        hits, w, _ = search_by_content(content_files, content_groups, cs,
+                                       max_bytes, args.errors)
+        warnings.extend(w)
+        results = [(p, t) for p, t in hits]
+    else:
+        results = [(p, None) for p in sorted(name_hits)]
+
+    results.sort(key=lambda r: str(r[0]).lower())
+    total = len(results)
+    shown = results[:args.limit] if args.limit and args.limit > 0 else results
+
+    def display(p: Path) -> str:
+        try:
+            if args.absolute:
+                return str(p.resolve())
+            if root.is_dir():
+                return str(p.relative_to(root.resolve()
+                                         if root.is_absolute() else root))
+            return str(p)
+        except ValueError:
+            return str(p)
+
+    if args.count:
+        print(total)
+        return 0 if total else 1
+
+    mode = []
+    if name_q:
+        mode.append(f"name:{name_q!r}")
+    if content_q:
+        mode.append(f"content:{content_q!r}")
+    print(f"searcher: {' + '.join(mode)} under {root} "
+          f"({'recursive' if recursive and root.is_dir() else 'single level'})")
+    print(SEPARATOR)
+
+    if not shown:
+        print("No matches.")
+    for i, (fp, text) in enumerate(shown, 1):
+        print(f"  [{i}] {display(fp)}")
+        if text is not None and args.lines != 0:
+            idx = find_matching_lines(text, content_groups, cs)
+            if idx:
+                print_snippet(text, idx, args.lines, content_groups, cs)
+        print()
+
+    print(SEPARATOR)
+    print(f"{total} match(es)" + (f" (showing {len(shown)})" if len(shown) != total else ""))
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    return 0 if total else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
