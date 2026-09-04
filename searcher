@@ -49,8 +49,7 @@ import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-# import fontTools.pdfLib.pdfData # added by human
-import pypdf #added by human
+#import pypdf #uncomment this line if you install pypdf; added by human
 
 PROG = "searcher"
 VERSION = "1.0.0"
