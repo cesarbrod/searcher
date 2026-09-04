@@ -12,6 +12,7 @@ Single-file Python program. No build step. Works out of the box for `txt`, `md`,
 - Optional `pypdf` support for higher-quality PDF text extraction, longer processing time.
 - Snippet previews with matched terms highlighted.
 - Recursive search with sensible skips (`.git`, `venv`, `__pycache__`, …).
+- Live status bar on stderr: scan count, progress bar, timing summary (`-q` to silence).
 - Script-friendly: exit codes, `--count`, `--limit`, `--absolute`.
 
 ## Query syntax
@@ -44,16 +45,12 @@ chmod +x searcher
 ./searcher --help
 ```
 
-Optional — better PDF extraction (less performance):
+Optional — better PDF extraction with `pypdf` (slower, but higher quality).
+If installed, it is used automatically — no code changes needed:
 
 ```bash
-pip install pypdf fonttools
+pip install pypdf
 ```
-then remove the leading # from the line
-
-`#import pypdf`
-
-on the file `search`
 
 Optionally put it on your `PATH`:
 
@@ -135,9 +132,18 @@ searcher [PATH] --name NAME_Q --content CONTENT_Q
 | `--count` | Only print the match count |
 | `--absolute` | Print absolute paths (default: relative to `PATH`) |
 | `--errors` | Show per-file read/parse warnings |
+| `-q, --quiet` | Suppress the live status bar and summary |
 | `--version` | Show version and exit |
 
 Exit codes: `0` = match(es) found, `1` = no matches, `2` = error.
+
+### Status bar
+
+While running interactively, `searcher` shows a live single-line status on
+**stderr**: file-scanning count, then a `####....` progress bar with the file
+currently being read, and finally a `N match(es) in M file(s) (T.Ts)` summary.
+Stdout is untouched, so piping and `--count` keep working. The bar is
+automatically off when output is piped — use `-q`/`--quiet` to force it off.
 
 ## Supported formats
 
@@ -177,8 +183,13 @@ Skipped automatically: `__pycache__ .git .hg .svn node_modules .venv venv .tox .
 
 ```text
 searcher/
-├── searcher    # the program (single file, executable)
-└── README.md
+├── searcher            # the program (single file, executable)
+├── README.md
+├── prompt.md
+└── dist/
+    ├── searcher        # Linux x86-64 binary (pypdf baked in)
+    ├── searcher.exe    # Windows x86-64 binary (pypdf baked in)
+    └── delme            # placeholder file
 ```
 
 ## License
