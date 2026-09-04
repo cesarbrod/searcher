@@ -23,7 +23,7 @@ Matching is case-insensitive by default (use `--case-sensitive` to change).
 |---|---|
 | `A` | anything containing `A` |
 | `A B` | anything containing `A` AND `B` |
-| `A OR B` | anything containing `A` or `B` |
+| `A OR B` | anything containing `A` OR `B` |
 | `"A A A"` | the exact composed string |
 | `"B B B" "A A A"` | must contain both exact strings (AND) |
 | `"B B B" OR "A A A"` | must contain at least one of the two (OR) |
