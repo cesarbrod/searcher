@@ -65,6 +65,18 @@ Pre-built binaries are in `dist/`:
 | `dist/searcher` | Linux x86-64 | No Python needed, `pypdf` baked in |
 | `dist/searcher.exe` | Windows x86-64 | No Python needed, `pypdf` baked in; run from `cmd` or PowerShell |
 
+## Tutorials
+
+New to Linux? Start with the step-by-step tutorial (same content in four
+languages). It covers first searches, the query language, file-type filters,
+result options, a `find` / `locate` / `grep` comparison, a task cookbook,
+troubleshooting, and a cheat sheet:
+
+- [English](docs/tutorial.md)
+- [Português (Brasil)](docs/tutorial-ptbr.md)
+- [Español](docs/tutorial-es.md)
+- [Français](docs/tutorial-fr.md)
+
 ## Usage
 
 ```bash
@@ -190,7 +202,10 @@ searcher/
 │   ├── searcher        # Linux x86-64 binary (pypdf baked in)
 │   └── searcher.exe    # Windows x86-64 binary (pypdf baked in)
 └── docs/
-    └── tutorial.md     # beginner tutorial (Linux, find/locate/grep comparison)
+    ├── tutorial.md      # beginner tutorial, English (Linux, find/locate/grep comparison)
+    ├── tutorial-ptbr.md # same tutorial in Brazilian Portuguese
+    ├── tutorial-es.md   # same tutorial in Spanish
+    └── tutorial-fr.md   # same tutorial in French
 ```
 
 ## License
