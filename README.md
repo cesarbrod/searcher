@@ -65,6 +65,8 @@ Pre-built binaries are in `dist/`:
 |---|---|---|
 | `dist/searcher` | Linux x86-64 | No Python needed, `pypdf` baked in |
 | `dist/searcher.exe` | Windows x86-64 | No Python needed, `pypdf` baked in; run from `cmd` or PowerShell |
+| `dist/searcher-gui` | Linux x86-64 | No Python needed, Qt + `pypdf` baked in (`searcher` core included) |
+| `dist/searcher-gui.exe` | Windows x86-64 | No Python needed, Qt + `pypdf` baked in (`searcher` core included); double-click or run from `cmd`/PowerShell |
 
 ## Tutorials
 
@@ -114,7 +116,11 @@ Notes:
 - Headless smoke test (also checks translations, query composer, CLI
   builder, and an end-to-end search):
   `QT_QPA_PLATFORM=offscreen ./searcher-gui --self-test`.
-- No pre-built GUI binary is provided yet — run it from source as above.
+- Pre-built GUI binaries are in `dist/` (`searcher-gui` for Linux,
+  `searcher-gui.exe` for Windows, Qt + `pypdf` + the `searcher` core baked
+  in) — run them directly instead of the script. Smoke-test a binary the
+  same way: `QT_QPA_PLATFORM=offscreen ./dist/searcher-gui --self-test`
+  (on Windows: `searcher-gui.exe --self-test` from `cmd`).
 
 ## Usage
 
@@ -240,7 +246,9 @@ searcher/
 ├── prompt.md
 ├── dist/
 │   ├── searcher        # Linux x86-64 binary (pypdf baked in)
-│   └── searcher.exe    # Windows x86-64 binary (pypdf baked in)
+│   ├── searcher.exe    # Windows x86-64 binary (pypdf baked in)
+│   ├── searcher-gui    # Linux x86-64 GUI binary (Qt + pypdf baked in)
+│   └── searcher-gui.exe # Windows x86-64 GUI binary (Qt + pypdf baked in)
 └── docs/
     ├── tutorial.md      # beginner tutorial, English (Linux, find/locate/grep comparison)
     ├── tutorial-ptbr.md # same tutorial in Brazilian Portuguese
