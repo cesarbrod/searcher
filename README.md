@@ -14,6 +14,7 @@ Single-file Python program. No build step. Works out of the box for `txt`, `md`,
 - Recursive search with sensible skips (`.git`, `venv`, `__pycache__`, …).
 - Live status bar on stderr: scan count, progress bar, timing summary (`-q` to silence).
 - Script-friendly: exit codes, `--count`, `--limit`, `--absolute`.
+- Optional graphical wizard (`searcher-gui`, needs PyQt6) with command-line equivalent preview.
 
 ## Query syntax
 
@@ -77,11 +78,7 @@ troubleshooting, and a cheat sheet:
 - [Español](docs/tutorial-es.md)
 - [Français](docs/tutorial-fr.md)
 
-## Graphical interface (extremely experimental)
-
-> ⚠️ **Warning: this GUI is extremely experimental.** It works, but expect
-> rough edges, untranslated wizard buttons, and little testing outside happy
-> paths. The terminal program above remains the stable, recommended way.
+## Graphical interface
 
 `searcher-gui` is a point-and-click wizard wrapper around `searcher`: pick a
 folder, pick file types, describe what to find in plain fields, and browse
@@ -103,8 +100,20 @@ chmod +x searcher-gui
 Notes:
 
 - On first run it asks for the interface language (English, Português,
-  Español, Français); the choice is saved and can be changed later in
+  Español, Français); the choice is saved to
+  `~/.config/searcher-gui/settings.json` and can be changed later in
   Settings → Language.
+- The 4-step wizard (folder → file types → query → options) remembers your
+  last settings, including recent folders.
+- **Command line equivalent:** the final Options screen shows the exact
+  `searcher` CLI command for the current wizard state (read-only field with
+  a Copy button), refreshed every time the screen is shown. The same command
+  is also shown at the top of the results window, so any GUI search can be
+  replayed or scripted from the terminal. Example:
+  `searcher /tmp 'annual report' --limit 500 --lines 3`.
+- Headless smoke test (also checks translations, query composer, CLI
+  builder, and an end-to-end search):
+  `QT_QPA_PLATFORM=offscreen ./searcher-gui --self-test`.
 - No pre-built GUI binary is provided yet — run it from source as above.
 
 ## Usage
@@ -226,7 +235,7 @@ Skipped automatically: `__pycache__ .git .hg .svn node_modules .venv venv .tox .
 ```text
 searcher/
 ├── searcher            # the program (single file, executable)
-├── searcher-gui        # graphical wizard (needs PyQt6, extremely experimental)
+├── searcher-gui        # graphical wizard (needs PyQt6)
 ├── README.md
 ├── prompt.md
 ├── dist/

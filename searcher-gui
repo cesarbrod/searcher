@@ -18,12 +18,13 @@ import csv
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
 
 PROG = "searcher-gui"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_DIR = Path.home() / ".config" / "searcher-gui"
@@ -124,6 +125,9 @@ S = {
         "o_maxsize": "Skip files bigger than (MB):",
         "o_limit": "Stop after N results (0 = no limit):",
         "o_lines": "Preview lines per result:",
+        "cli_label": "Command line equivalent:",
+        "cli_copy": "Copy",
+        "cli_copied": "Command copied to clipboard.",
         "r_title": "searcher — results",
         "r_hits": "{n} match(es)",
         "r_none": "No matches. Try fewer words, an OR search, or more file types.",
@@ -194,6 +198,9 @@ S = {
         "o_maxsize": "Pular arquivos maiores que (MB):",
         "o_limit": "Parar após N resultados (0 = sem limite):",
         "o_lines": "Linhas de prévia por resultado:",
+        "cli_label": "Equivalente em linha de comando:",
+        "cli_copy": "Copiar",
+        "cli_copied": "Comando copiado.",
         "r_title": "searcher — resultados",
         "r_hits": "{n} resultado(s)",
         "r_none": "Nada encontrado. Tente menos palavras, uma busca OU ou mais tipos de arquivo.",
@@ -265,6 +272,9 @@ S = {
         "o_maxsize": "Omitir archivos de más de (MB):",
         "o_limit": "Detener tras N resultados (0 = sin límite):",
         "o_lines": "Líneas de vista previa por resultado:",
+        "cli_label": "Equivalente en línea de comandos:",
+        "cli_copy": "Copiar",
+        "cli_copied": "Comando copiado.",
         "r_title": "searcher — resultados",
         "r_hits": "{n} resultado(s)",
         "r_none": "Sin resultados. Prueba con menos palabras, una búsqueda O o más tipos de archivo.",
@@ -336,6 +346,9 @@ S = {
         "o_maxsize": "Ignorer les fichiers de plus de (Mo) :",
         "o_limit": "S'arrêter après N résultats (0 = sans limite) :",
         "o_lines": "Lignes d'aperçu par résultat :",
+        "cli_label": "Équivalent en ligne de commande :",
+        "cli_copy": "Copier",
+        "cli_copied": "Commande copiée.",
         "r_title": "searcher — résultats",
         "r_hits": "{n} résultat(s)",
         "r_none": "Aucun résultat. Essayez moins de mots, une recherche OU ou plus de types de fichiers.",
@@ -440,6 +453,57 @@ def compose_query(all_words: str, any_words: str, phrase: str) -> str:
             parts.append(" OR ".join(yw))
         else:
             parts.append(" ".join(yw))
+    return " ".join(parts)
+
+
+def build_cli_command(core, params: dict, prog: str = "searcher") -> str:
+    """Build the `searcher` CLI equivalent for GUI params.
+
+    Mirrors the core defaults (max-size 50, lines 2, limit 0=all,
+    recursive on, default ext set) so the pasted command reproduces the
+    same search. Only non-default options are emitted, except --limit
+    and --lines which are always shown when they differ from core
+    defaults (GUI defaults are 500/3).
+    """
+    parts = [prog, shlex.quote(str(params.get("root", ".")))]
+    name_q = params.get("name_q")
+    content_q = params.get("content_q")
+    if name_q and content_q:
+        parts += ["--name", shlex.quote(name_q),
+                  "--content", shlex.quote(content_q)]
+    elif name_q:
+        parts += ["--name", shlex.quote(name_q)]
+    elif content_q:
+        parts.append(shlex.quote(content_q))
+
+    allowed = params.get("allowed")
+    if allowed is not None:
+        allowed_set = set(allowed)
+        if allowed_set == set(core.DEFAULT_EXTS):
+            pass  # default set: no flag needed
+        elif allowed_set == set(core.DEFAULT_EXTS) | set(core.ALL_TEXT_EXTRA):
+            parts.append("--all-text")
+        else:
+            parts += ["--ext", ",".join(sorted(allowed_set))]
+
+    if params.get("cs"):
+        parts.append("--case-sensitive")
+    if not params.get("recursive", True):
+        parts.append("--no-recursive")
+    if params.get("hidden"):
+        parts.append("--hidden")
+
+    max_bytes = params.get("max_bytes", 50 * 1024 * 1024)
+    max_mb = max_bytes / (1024 * 1024)
+    if abs(max_mb - 50) > 1e-9:
+        parts += ["--max-size", ("%g" % max_mb)]
+
+    limit = params.get("limit", 0)
+    if limit:
+        parts += ["--limit", str(limit)]
+    lines = params.get("lines", 2)
+    if lines != 2:
+        parts += ["--lines", str(lines)]
     return " ".join(parts)
 
 
@@ -622,6 +686,9 @@ class SearchWizard(QWizard):
         self.lbl_max.setText(t("o_maxsize"))
         self.lbl_limit.setText(t("o_limit"))
         self.lbl_lines.setText(t("o_lines"))
+        self.lbl_cli.setText(t("cli_label"))
+        self.btn_cli_copy.setText(t("cli_copy"))
+        self._refresh_cli()
 
     # -- page 1: where ----------------------------------------------------
     def _build_page1(self) -> QWizardPage:
@@ -766,7 +833,8 @@ class SearchWizard(QWizard):
     # -- page 4: options ----------------------------------------------------
     def _build_page4(self) -> QWizardPage:
         pg = QWizardPage()
-        form = QFormLayout(pg)
+        lay = QVBoxLayout(pg)
+        form = QFormLayout()
         self.chk_case = QCheckBox()
         self.spin_max = QSpinBox()
         self.spin_max.setRange(1, 10000)
@@ -782,7 +850,39 @@ class SearchWizard(QWizard):
         form.addRow(self.lbl_max, self.spin_max)
         form.addRow(self.lbl_limit, self.spin_limit)
         form.addRow(self.lbl_lines, self.spin_lines)
+        lay.addLayout(form)
+        self.lbl_cli = QLabel()
+        self.lbl_cli.setWordWrap(True)
+        lay.addWidget(self.lbl_cli)
+        cli_row = QHBoxLayout()
+        self.ed_cli = QLineEdit()
+        self.ed_cli.setReadOnly(True)
+        self.ed_cli.setPlaceholderText("searcher …")
+        cli_row.addWidget(self.ed_cli, 1)
+        self.btn_cli_copy = QPushButton()
+        self.btn_cli_copy.clicked.connect(self._copy_cli)
+        cli_row.addWidget(self.btn_cli_copy)
+        lay.addLayout(cli_row)
+        lay.addStretch(1)
+        for w in (self.chk_case,):
+            w.toggled.connect(lambda _o: self._refresh_cli())
+        for sp in (self.spin_max, self.spin_limit, self.spin_lines):
+            sp.valueChanged.connect(lambda _v: self._refresh_cli())
+        # Refresh every time the final screen is shown so edits on
+        # pages 1-3 are reflected.
+        orig_init = pg.initializePage
+
+        def initialize_page() -> None:
+            orig_init()
+            self._refresh_cli()
+
+        pg.initializePage = initialize_page  # type: ignore[method-assign]
         return pg
+
+    def _copy_cli(self) -> None:
+        QApplication.clipboard().setText(self.ed_cli.text())
+        QMessageBox.information(self, self.tr("warn_title"),
+                                self.tr("cli_copied"))
 
     # -- restore last session ----------------------------------------------
     def _restore_last(self) -> None:
@@ -813,9 +913,10 @@ class SearchWizard(QWizard):
         self.chk_recursive.setChecked(bool(last.get("recursive", True)))
         self.chk_hidden.setChecked(bool(last.get("hidden", False)))
         self._refresh_query()
+        self._refresh_cli()
 
-    def collect(self) -> dict:
-        """Gather wizard state + resolve file-type preset to an ext set."""
+    def preview_params(self) -> dict:
+        """Build search params from current widget state (no side effects)."""
         core = self.core
         preset = next((k for k, rb in self.preset_radios.items()
                        if rb.isChecked()), "docs")
@@ -840,7 +941,7 @@ class SearchWizard(QWizard):
         name_q = query if mode in ("name", "both") else None
         content_q = query if mode in ("content", "both") else None
         folder = str(Path(self.ed_folder.text()).expanduser())
-        params = {
+        return {
             "root": Path(folder),
             "recursive": self.chk_recursive.isChecked(),
             "hidden": self.chk_hidden.isChecked(),
@@ -853,6 +954,26 @@ class SearchWizard(QWizard):
             "lines": self.spin_lines.value(),
             "verbose_errors": False,
         }
+
+    def _refresh_cli(self) -> None:
+        """Update the command-line preview on the final screen."""
+        if not hasattr(self, "ed_cli"):
+            return
+        try:
+            self.ed_cli.setText(build_cli_command(self.core,
+                                                  self.preview_params()))
+        except Exception:
+            pass
+
+    def collect(self) -> dict:
+        """Gather wizard state + resolve file-type preset to an ext set."""
+        params = self.preview_params()
+        preset = next((k for k, rb in self.preset_radios.items()
+                       if rb.isChecked()), "docs")
+        custom_raw = self.custom_ext.text()
+        mode = ("content" if self.mode_content.isChecked()
+                else "name" if self.mode_name.isChecked() else "both")
+        folder = str(params["root"])
         # persist for next run
         last = {
             "folder": folder, "preset": preset, "custom_ext": custom_raw,
@@ -928,6 +1049,21 @@ class ResultsWindow(QMainWindow):
         self.info = QLabel(f"<b>{self._esc(query_text)}</b> — {params['root']}")
         self.info.setWordWrap(True)
         lay.addWidget(self.info)
+        cli_row = QHBoxLayout()
+        self.cli_label = QLabel()
+        self.cli_view = QLineEdit()
+        self.cli_view.setReadOnly(True)
+        try:
+            self.cli_view.setText(build_cli_command(core, params))
+        except Exception:
+            pass
+        self.cli_view.setToolTip(self.cli_view.text())
+        self.btn_cli_copy = QPushButton()
+        self.btn_cli_copy.clicked.connect(self.copy_cli)
+        cli_row.addWidget(self.cli_label)
+        cli_row.addWidget(self.cli_view, 1)
+        cli_row.addWidget(self.btn_cli_copy)
+        lay.addLayout(cli_row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setVisible(False)
@@ -961,6 +1097,9 @@ class ResultsWindow(QMainWindow):
         self.act_save.setText(t("r_save"))
         self.act_new.setText(t("r_new"))
         self.act_cancel.setText(t("r_cancel_search"))
+        if hasattr(self, "cli_label"):
+            self.cli_label.setText(t("cli_label"))
+            self.btn_cli_copy.setText(t("cli_copy"))
 
     # -- search lifecycle --------------------------------------------------
     def start(self) -> None:
@@ -1098,6 +1237,10 @@ class ResultsWindow(QMainWindow):
             QApplication.clipboard().setText(path)
             self.status.showMessage(self.tr("r_copied"), 3000)
 
+    def copy_cli(self) -> None:
+        QApplication.clipboard().setText(self.cli_view.text())
+        self.status.showMessage(self.tr("cli_copied"), 3000)
+
     def save_list(self) -> None:
         t = self.tr
         if not self.results:
@@ -1204,6 +1347,34 @@ def self_test() -> int:
     assert compose_query("", "", "q q") == '"q q"'
     assert compose_query("a", "x y", "p") == 'a "p" x y'
     print("composer OK")
+    # 2b. CLI equivalent builder
+    from pathlib import Path as _P
+    _dummy_root = _P("/docs")
+    p_base = {
+        "root": _dummy_root, "recursive": True, "hidden": False,
+        "allowed": set(core.DEFAULT_EXTS),
+        "max_bytes": 50 * 1024 * 1024,
+        "name_q": None, "content_q": "annual report",
+        "cs": False, "limit": 500, "lines": 3, "verbose_errors": False,
+    }
+    cmd = build_cli_command(core, p_base)
+    assert cmd.startswith("searcher "), cmd
+    assert "annual report" in cmd, cmd
+    assert "--limit 500" in cmd and "--lines 3" in cmd, cmd
+    assert "--ext" not in cmd and "--all-text" not in cmd, cmd
+    p_both = dict(p_base, name_q="invoice", content_q="paid OR overdue",
+                  allowed={"pdf"}, cs=True, recursive=False, hidden=True,
+                  max_bytes=int(10 * 1024 * 1024), limit=0, lines=2)
+    cmd2 = build_cli_command(core, p_both)
+    assert "--name" in cmd2 and "--content" in cmd2, cmd2
+    assert "--ext pdf" in cmd2, cmd2
+    assert "--case-sensitive" in cmd2 and "--no-recursive" in cmd2, cmd2
+    assert "--hidden" in cmd2 and "--max-size 10" in cmd2, cmd2
+    assert "--limit" not in cmd2 and "--lines" not in cmd2, cmd2
+    p_code = dict(p_base,
+                  allowed=set(core.DEFAULT_EXTS) | set(core.ALL_TEXT_EXTRA))
+    assert "--all-text" in build_cli_command(core, p_code)
+    print("cli OK")
     # 3. real search through core on temp docs
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="guitest_"))
