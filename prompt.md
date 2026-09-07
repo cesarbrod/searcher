@@ -5,7 +5,7 @@ The tools used to vibe code this educational only example are
 [opencode](https://opencode.ai/)
 [Muse Spark 1.3](https://developer.meta.com/ai/models/muse-spark/)
 
-Here is the prompt I used:
+Here is the initial prompt I used:
 
 ```
 Write a python program that will help me find document files (txt, md, pdf, docx and other popular text formats) by name or content. When searching by content, it must work as following (A and B are strings):
@@ -22,3 +22,5 @@ The result must be a client (terminal based) program to be called by the user.
 
 Name the program "searcher" and store it on /home/brod/scripts/opencode/searcher/
 ```
+
+The prompt above was enough to create a very useful program. With the time, however, new features have been added by new prompting or direct editing of the python scripts.
