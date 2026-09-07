@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 PROG = "searcher-gui"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_DIR = Path.home() / ".config" / "searcher-gui"
