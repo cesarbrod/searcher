@@ -118,6 +118,11 @@ Notes:
 - Headless smoke test (also checks translations, query composer, CLI
   builder, and an end-to-end search):
   `QT_QPA_PLATFORM=offscreen ./searcher-gui --self-test`.
+- In the results window you can select one file or several (Ctrl/Shift
+  + click) and press Open (or double-click): each file opens with its
+  default application. If a file type has no default, an "Open with…"
+  picker asks which application to use, with an option to remember it
+  per extension.
 - Pre-built GUI binaries are in `dist/` (`searcher-gui` for Linux,
   `searcher-gui.exe` for Windows, Qt + `pypdf` + the `searcher` core baked
   in) — run them directly instead of the script. Smoke-test a binary the

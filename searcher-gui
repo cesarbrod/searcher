@@ -35,10 +35,10 @@ if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
     os.environ["QT_QPA_PLATFORM"] = "wayland"
 
 try:
-    from PyQt6.QtCore import QObject, QRunnable, Qt, QThread, QUrl, pyqtSignal
+    from PyQt6.QtCore import QObject, QProcess, QRunnable, Qt, QThread, QUrl, pyqtSignal
     from PyQt6.QtGui import QAction, QDesktopServices
     from PyQt6.QtWidgets import (
-        QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+        QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout,
         QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
         QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton,
         QSpinBox, QSplitter, QTextBrowser, QVBoxLayout, QWidget, QWizard,
@@ -141,6 +141,13 @@ S = {
         "r_save_filter": "CSV files (*.csv);;Text files (*.txt)",
         "r_saved": "Saved {n} result(s) to:\n{path}",
         "r_copied": "Path copied to clipboard.",
+        "open_with_title": "Open with…",
+        "open_with_prompt": "No default application for \"{name}\". Pick one:",
+        "open_with_app": "Application:",
+        "open_with_remember": "Always use this for {ext} files",
+        "open_with_filter": "Programs (*.exe);;All files (*)",
+        "open_failed": "Could not open \"{name}\".",
+        "open_started": "Opened {n} file(s).",
         "menu_settings": "Settings", "menu_language": "Language",
         "menu_help": "Help", "menu_about": "About",
         "about_title": "About searcher-gui",
@@ -214,6 +221,13 @@ S = {
         "r_save_filter": "Arquivos CSV (*.csv);;Arquivos de texto (*.txt)",
         "r_saved": "{n} resultado(s) salvos em:\n{path}",
         "r_copied": "Caminho copiado.",
+        "open_with_title": "Abrir com…",
+        "open_with_prompt": "Nenhum aplicativo padrão para \"{name}\". Escolha um:",
+        "open_with_app": "Aplicativo:",
+        "open_with_remember": "Usar sempre para arquivos {ext}",
+        "open_with_filter": "Programas (*.exe);;Todos os arquivos (*)",
+        "open_failed": "Não foi possível abrir \"{name}\".",
+        "open_started": "{n} arquivo(s) aberto(s).",
         "menu_settings": "Configurações", "menu_language": "Idioma",
         "menu_help": "Ajuda", "menu_about": "Sobre",
         "about_title": "Sobre o searcher-gui",
@@ -288,6 +302,13 @@ S = {
         "r_save_filter": "Archivos CSV (*.csv);;Archivos de texto (*.txt)",
         "r_saved": "{n} resultado(s) guardados en:\n{path}",
         "r_copied": "Ruta copiada.",
+        "open_with_title": "Abrir con…",
+        "open_with_prompt": "Ninguna aplicación predeterminada para \"{name}\". Elige una:",
+        "open_with_app": "Aplicación:",
+        "open_with_remember": "Usar siempre para archivos {ext}",
+        "open_with_filter": "Programas (*.exe);;Todos los archivos (*)",
+        "open_failed": "No se pudo abrir \"{name}\".",
+        "open_started": "{n} archivo(s) abierto(s).",
         "menu_settings": "Ajustes", "menu_language": "Idioma",
         "menu_help": "Ayuda", "menu_about": "Acerca de",
         "about_title": "Acerca de searcher-gui",
@@ -362,6 +383,13 @@ S = {
         "r_save_filter": "Fichiers CSV (*.csv);;Fichiers texte (*.txt)",
         "r_saved": "{n} résultat(s) enregistrés dans :\n{path}",
         "r_copied": "Chemin copié.",
+        "open_with_title": "Ouvrir avec…",
+        "open_with_prompt": "Aucune application par défaut pour « {name} ». Choisissez-en une :",
+        "open_with_app": "Application :",
+        "open_with_remember": "Toujours utiliser pour les fichiers {ext}",
+        "open_with_filter": "Programmes (*.exe);;Tous les fichiers (*)",
+        "open_failed": "Impossible d'ouvrir « {name} ».",
+        "open_started": "{n} fichier(s) ouvert(s).",
         "menu_settings": "Réglages", "menu_language": "Langue",
         "menu_help": "Aide", "menu_about": "À propos",
         "about_title": "À propos de searcher-gui",
@@ -385,6 +413,7 @@ S = {
 DEFAULTS = {
     "lang": None,
     "recent_folders": [],
+    "open_with": {},
     "last": {
         "folder": str(Path.home() / "Documents"),
         "preset": "docs",
@@ -505,6 +534,32 @@ def build_cli_command(core, params: dict, prog: str = "searcher") -> str:
     if lines != 2:
         parts += ["--lines", str(lines)]
     return " ".join(parts)
+
+
+def _ext_of(path: str) -> str:
+    """Lower-cased file extension (with dot), e.g. '.pdf' ('' if none)."""
+    return Path(path).suffix.lower()
+
+
+def get_remembered_app(settings: dict, ext: str) -> str | None:
+    """App path previously chosen for this extension, if still on disk."""
+    app = (settings.get("open_with") or {}).get((ext or "").lower())
+    if app and Path(app).exists():
+        return app
+    return None
+
+
+def remember_app(settings: dict, ext: str, app: str) -> None:
+    """Remember app for extension (caller persists via save_settings)."""
+    settings.setdefault("open_with", {})[(ext or "").lower()] = app
+
+
+def open_path_with_app(app: str, path: str) -> bool:
+    """Launch app with path, detached. Returns True if started."""
+    try:
+        return bool(QProcess.startDetached(app, [path]))
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1052,67 @@ class SearchWizard(QWizard):
 
 
 # ---------------------------------------------------------------------------
+# "Open with…" fallback picker (no default application for a file type)
+# ---------------------------------------------------------------------------
+
+class OpenWithDialog(QDialog):
+    """Ask which application should open a file.
+
+    tr: translation function, filename: shown in the prompt,
+    ext: lower-cased extension for the "remember" label (checkbox hidden
+    when the file has no extension).
+    """
+
+    def __init__(self, tr, filename: str, ext: str, parent=None):
+        super().__init__(parent)
+        self._tr = tr
+        self._ext = ext or ""
+        self.setWindowTitle(tr("open_with_title"))
+        lay = QVBoxLayout(self)
+        prompt = QLabel(tr("open_with_prompt").format(name=filename))
+        prompt.setWordWrap(True)
+        lay.addWidget(prompt)
+        row = QHBoxLayout()
+        row.addWidget(QLabel(tr("open_with_app")))
+        self.ed_app = QLineEdit()
+        browse = QPushButton(tr("browse"))
+        browse.clicked.connect(self._browse)
+        row.addWidget(self.ed_app, 1)
+        row.addWidget(browse)
+        lay.addLayout(row)
+        self.chk_remember = QCheckBox(
+            tr("open_with_remember").format(ext=self._ext))
+        self.chk_remember.setVisible(bool(self._ext))
+        lay.addWidget(self.chk_remember)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _browse(self) -> None:
+        filt = self._tr("open_with_filter") if sys.platform == "win32" else ""
+        app, _ = QFileDialog.getOpenFileName(
+            self, self._tr("open_with_title"), str(Path.home()), filt)
+        if app:
+            self.ed_app.setText(app)
+
+    def accept(self) -> None:
+        if self.ed_app.text().strip():
+            super().accept()
+        # else: stay open so the user picks something or cancels
+
+    @property
+    def app(self) -> str:
+        return self.ed_app.text().strip()
+
+    @property
+    def remember(self) -> bool:
+        return bool(self._ext) and self.chk_remember.isChecked()
+
+
+# ---------------------------------------------------------------------------
 # Results window
 # ---------------------------------------------------------------------------
 
@@ -1070,6 +1186,8 @@ class ResultsWindow(QMainWindow):
         lay.addWidget(self.progress)
         split = QSplitter(Qt.Orientation.Horizontal)
         self.list = QListWidget()
+        self.list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.itemSelectionChanged.connect(self._show_selected)
         self.list.itemDoubleClicked.connect(lambda _i: self.open_selected())
         self.preview = QTextBrowser()
@@ -1220,10 +1338,59 @@ class ResultsWindow(QMainWindow):
             return core.parse_query(self.params["content_q"])
         return core.parse_query(self.params["name_q"] or "")
 
+    def _selected_paths(self) -> list[str]:
+        items = self.list.selectedItems()
+        if not items and self.list.currentItem() is not None:
+            items = [self.list.currentItem()]
+        out: list[str] = []
+        for it in items:
+            p = it.data(Qt.ItemDataRole.UserRole)
+            if p:
+                out.append(p)
+        return out
+
     def open_selected(self) -> None:
-        path = self._selected_path()
-        if path:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        """Open every selected result with its default application.
+
+        Files with no default application fall back to an "Open with…"
+        picker (optionally remembered per extension).
+        """
+        t = self.tr
+        paths = self._selected_paths()
+        if not paths:
+            return
+        failed: list[str] = []
+        for path in paths:
+            if not self.open_one(path):
+                failed.append(Path(path).name)
+        if failed:
+            QMessageBox.warning(
+                self, t("warn_title"),
+                "\n".join(t("open_failed").format(name=n) for n in failed))
+        else:
+            self.status.showMessage(
+                t("open_started").format(n=len(paths)), 4000)
+
+    def open_one(self, path: str) -> bool:
+        """Open one file; True once handed off to an application."""
+        try:
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                return True
+        except Exception:
+            pass
+        ext = _ext_of(path)
+        app = get_remembered_app(self.settings, ext)
+        if app and open_path_with_app(app, path):
+            return True
+        dlg = OpenWithDialog(self.tr, Path(path).name, ext, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        if open_path_with_app(dlg.app, path):
+            if dlg.remember:
+                remember_app(self.settings, ext, dlg.app)
+                save_settings(self.settings)
+            return True
+        return False
 
     def reveal_selected(self) -> None:
         path = self._selected_path()
@@ -1417,6 +1584,17 @@ def self_test() -> int:
     assert len(got["results"]) == 1, got
     assert got["warnings"] == [], got
     print("worker OK")
+    # 6. open-with helpers (remembered app per extension)
+    ow: dict = {}
+    assert get_remembered_app(ow, ".pdf") is None
+    remember_app(ow, ".PDF", sys.executable)
+    assert get_remembered_app(ow, ".pdf") == sys.executable
+    assert get_remembered_app(ow, ".PDF") == sys.executable
+    ow["open_with"][".pdf"] = str(Path("nonexistent-app-xyz"))
+    assert get_remembered_app(ow, ".pdf") is None  # gone: ask again
+    assert _ext_of("/tmp/Report.PDF") == ".pdf"
+    assert _ext_of("noext") == ""
+    print("open-with OK")
     import shutil as _shutil
     _shutil.rmtree(tmp, ignore_errors=True)
     print("ALL GUI SELF-TESTS PASSED")
