@@ -43,6 +43,14 @@ jobs:
       - name: Install build deps
         run: python -m pip install --upgrade pip && pip install pyinstaller pyqt6 pypdf
 
+      - name: Install Qt system libs (Linux)
+        # Minimal ubuntu runners lack the shared libs PyQt6 links against
+        # (libGL/EGL, xkbcommon, fontconfig...). Without them the frozen
+        # binary dies at `import PyQt6` in ~1s (exit 2). Windows runners
+        # already ship the needed DLLs, so this step is Linux-only.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3
+
       - name: Build with PyInstaller
         # --add-data bundles the `searcher` core script next to the frozen
         # app (load_core() finds it via __file__, frozen or not). The hidden
