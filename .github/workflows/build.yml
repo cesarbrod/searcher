@@ -1,0 +1,80 @@
+name: build-gui-binaries
+
+# Builds standalone searcher-gui binaries (Linux + Windows) with PyInstaller:
+# - on every tag push like v1.1.0  -> build, smoke-test, publish GitHub Release
+# - manually via "Run workflow"    -> build + smoke-test, artifacts only
+#
+# The Windows .exe cannot be cross-built on Linux (PyInstaller is host-only),
+# so this workflow is the canonical way to produce dist/searcher-gui.exe.
+# After a release, copy the assets into dist/ and push (keeps git history
+# reviewable instead of having CI push binaries itself).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            sep: ":"
+            exe: dist/searcher-gui
+            artifact: searcher-gui-linux
+          - os: windows-latest
+            sep: ";"
+            exe: dist\searcher-gui.exe
+            artifact: searcher-gui-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build deps
+        run: python -m pip install --upgrade pip && pip install pyinstaller pyqt6 pypdf
+
+      - name: Build with PyInstaller
+        # --add-data bundles the `searcher` core script next to the frozen
+        # app (load_core() finds it via __file__, frozen or not). The hidden
+        # imports are stdlib/third-party modules only reachable through that
+        # dynamically-loaded core script (plus pypdf for PDF quality).
+        run: python -m PyInstaller --onefile --name searcher-gui --add-data "searcher${{ matrix.sep }}." --hidden-import xml --hidden-import xml.etree.ElementTree --hidden-import zipfile --hidden-import argparse --hidden-import pypdf --noconfirm searcher-gui
+
+      - name: Smoke test (headless self-test)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ${{ matrix.exe }} --self-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.exe }}
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la artifacts
+          gh release create "${{ github.ref_name }}" artifacts/* --title "${{ github.ref_name }}" --notes "searcher-gui binaries (Linux + Windows), built with PyInstaller. No Python needed, pypdf baked in."
