@@ -60,7 +60,7 @@ ln -s "$PWD/searcher" ~/.local/bin/searcher
 ```
 
 Pre-built binaries are in `dist/`, built from the current release
-(`v1.1.1` — verify with `./dist/searcher --version`). Tagged releases
+(`v1.1.2` — verify with `./dist/searcher --version`). Tagged releases
 also attach the CI-built GUI binaries as release assets on GitHub:
 
 | File | Platform | Notes |
