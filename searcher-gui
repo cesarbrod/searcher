@@ -44,8 +44,16 @@ try:
         QSpinBox, QSplitter, QTextBrowser, QVBoxLayout, QWidget, QWizard,
         QWizardPage, QDialog, QDialogButtonBox, QMenu, QStatusBar,
     )
-except ImportError:
-    print("searcher-gui needs PyQt6:  pip install PyQt6", file=sys.stderr)
+except ImportError as exc:
+    # Two very different failures land here: PyQt6 is genuinely missing, or it
+    # is right there but its Qt libraries refuse to load — a frozen build with
+    # a broken DLL search path on Windows, a slim Linux box without libGL.
+    # Printing only "pip install PyQt6" sends that second group off installing
+    # something they already have, so say what actually went wrong first.
+    # Plain ASCII on purpose: this runs on consoles with legacy codepages,
+    # and an error handler that dies of UnicodeEncodeError helps nobody.
+    print(f"{PROG}: cannot import PyQt6: {exc}", file=sys.stderr)
+    print("If PyQt6 is not installed yet:  pip install PyQt6", file=sys.stderr)
     sys.exit(2)
 
 

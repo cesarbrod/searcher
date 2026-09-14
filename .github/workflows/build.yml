@@ -1,6 +1,7 @@
-name: build-gui-binaries
+name: build-binaries
 
-# Builds standalone searcher-gui binaries (Linux + Windows) with PyInstaller:
+# Builds the standalone searcher CLI and searcher-gui binaries
+# (Linux + Windows) with PyInstaller:
 # - on every tag push like v1.1.0  -> build, smoke-test, publish GitHub Release
 # - manually via "Run workflow"    -> build + smoke-test, artifacts only
 #
@@ -8,6 +9,11 @@ name: build-gui-binaries
 # so this workflow is the canonical way to produce dist/searcher-gui.exe.
 # After a release, copy the assets into dist/ and push (keeps git history
 # reviewable instead of having CI push binaries itself).
+#
+# Build it here rather than by hand: a locally frozen binary inherits whatever
+# is in that machine's site-packages, which is how a working dev box can ship
+# a binary that dies with "needs PyQt6" on someone else's. requirements-build.txt
+# pins the versions so this workflow and a local venv build agree.
 
 on:
   push:
@@ -28,11 +34,13 @@ jobs:
           - os: ubuntu-22.04
             sep: ":"
             exe: dist/searcher-gui
-            artifact: searcher-gui-linux
+            cli: dist/searcher
+            artifact: searcher-linux
           - os: windows-latest
             sep: ";"
             exe: dist\searcher-gui.exe
-            artifact: searcher-gui-windows
+            cli: dist\searcher.exe
+            artifact: searcher-windows
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +49,8 @@ jobs:
           python-version: "3.13"
 
       - name: Install build deps
-        run: python -m pip install --upgrade pip && pip install pyinstaller pyqt6 pypdf
+        # Pinned in requirements-build.txt so this matches a local venv build.
+        run: python -m pip install --upgrade pip && pip install -r requirements-build.txt
 
       - name: Install Qt system libs (Linux)
         # Minimal ubuntu runners lack the shared libs PyQt6 links against
@@ -51,7 +60,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3
 
-      - name: Build with PyInstaller
+      - name: Build CLI with PyInstaller
+        # dist/searcher(.exe) used to be frozen by hand and committed. Building
+        # it here keeps it on the same pinned toolchain as the GUI.
+        run: python -m PyInstaller --onefile --name searcher --hidden-import pypdf --noconfirm searcher
+
+      - name: Smoke test CLI
+        # --version proves it starts. The content search proves the frozen
+        # binary can actually read a file: searcher exits 1 when nothing
+        # matches, so pointing it at a fixed file with a word that is
+        # certainly in it makes this a real assertion rather than a
+        # search over whatever the checkout happens to contain.
+        run: |
+          ${{ matrix.cli }} --version
+          ${{ matrix.cli }} README.md --content searcher --all-text
+
+      - name: Build GUI with PyInstaller
         # --add-data bundles the `searcher` core script next to the frozen
         # app (load_core() finds it via __file__, frozen or not). The hidden
         # imports are stdlib/third-party modules only reachable through that
@@ -66,7 +90,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.exe }}
+          path: |
+            ${{ matrix.exe }}
+            ${{ matrix.cli }}
           if-no-files-found: error
 
   release:
@@ -91,5 +117,5 @@ jobs:
           if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
             gh release upload "${{ github.ref_name }}" artifacts/* --clobber
           else
-            gh release create "${{ github.ref_name }}" artifacts/* --title "${{ github.ref_name }}" --notes "searcher-gui binaries (Linux + Windows), built with PyInstaller. No Python needed, pypdf baked in."
+            gh release create "${{ github.ref_name }}" artifacts/* --title "${{ github.ref_name }}" --notes "searcher CLI + GUI binaries (Linux + Windows), built with PyInstaller from pinned build deps. No Python needed, pypdf baked in."
           fi
