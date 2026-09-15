@@ -1,0 +1,27 @@
+# Build-time dependencies — only for producing the frozen binaries in dist/.
+#
+# searcher itself still needs nothing but the standard library, and the GUI
+# still only needs PyQt6. Nothing here is required to *run* the scripts.
+#
+# These are pinned because an unpinned build is not reproducible: a binary
+# frozen against whatever happens to sit in a developer's global
+# site-packages can quietly pick up unrelated Qt modules (Quick3D,
+# Multimedia, ffmpeg...) that are never imported but do change the frozen
+# app's library search path. That produces a much larger binary which can
+# fail at `import PyQt6.QtCore` on a clean machine — while the developer's
+# own box, where the real PyQt6 is installed, keeps working.
+#
+# Build in a fresh virtualenv:
+#     python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+#     pip install -r requirements-build.txt
+
+pyinstaller==6.22.3
+
+# PyQt6-Qt6 carries the actual Qt libraries, so it decides what ends up
+# inside the binary. Pin it alongside the bindings, not just PyQt6.
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.2
+PyQt6-sip==13.12.0
+
+# Better PDF text extraction; baked into the binaries so users get it for free.
+pypdf==6.18.1
